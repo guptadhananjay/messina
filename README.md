@@ -24,6 +24,25 @@ mic will feed back — `esc` mutes everything instantly.
 Click **Start** and grant mic permission. Click **Stop** to silence the voices,
 release the mic and close the audio context.
 
+## Input: mic or audio file
+
+Switch **Input** to **Audio file** to run a track through the harmonizer instead
+of your voice — pick a file or drop one onto the panel. `p` (or the Play button)
+starts it; there is a loop toggle and a clickable progress bar to scrub. File
+mode never asks for microphone permission, and pressing Play starts the engine on
+its own, so you never have to hit Start first.
+
+Formats are whatever Chrome's `decodeAudioData` accepts: **WAV, MP3, AAC `.m4a`
+(including Voice Memos and Apple Music files you own), FLAC and OGG.** The one
+trap is that `.m4a` covers two different codecs — AAC decodes fine, but **Apple
+Lossless does not**, and Chrome gives no useful error. The tool detects that case
+and prints an `afconvert` one-liner to the console to re-encode as AAC.
+
+Everything downstream is identical, so the keys and the chord chart transform
+playback exactly as they transform a live vocal. This is also the easiest way to
+audition the tool without fighting input latency, and a useful way to practise a
+chart before singing it.
+
 ## Playing it
 
 **Intervals, by hand.** The home rows are a piano keyboard: `a w s e d f t g y h
@@ -49,7 +68,8 @@ Recognized symbols cover what charts actually print: `Am`, `F#m7`, `Cmaj7`, `G7`
 shorthand like `C-7`, `CM7`, `CΔ`. Anything unparseable is outlined in red rather
 than silently dropped.
 
-Other controls: `esc` mutes, and the sliders set dry / harmony / reverb / master.
+Other controls: `p` plays/pauses a loaded file, `esc` mutes, and the sliders set
+dry / harmony / reverb / master.
 
 ## The catch
 
@@ -68,7 +88,7 @@ Live pitch tracking is the next thing to build, and it removes all of this.
 ## How it works
 
 ```
-mic ─► inputGain ─┬─► dryGain ─────────────────────┐
+mic or file ─► inputGain ─┬─► dryGain ─────────────┐
                   │                                │
                   └─► [8 × shifter → voiceGain] ─► harmonyGain ─┬─► mixBus ─► master ─► out
                                                                 └─► convolver ─► wetGain ─┘
@@ -78,7 +98,7 @@ mic ─► inputGain ─┬─► dryGain ────────────�
 | --- | --- |
 | `pitch-shifter.js` | `AudioWorkletProcessor` — one voice of real-time pitch shifting |
 | `chords.js` | chord-symbol parsing and voicing |
-| `app.js` | audio graph, mic, keyboard, chart control |
+| `app.js` | audio graph, input sources, transport, keyboard, chart control |
 | `index.html` | markup and styles |
 | `test-pitch-shifter.js` | offline DSP check |
 

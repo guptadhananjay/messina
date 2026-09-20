@@ -20,6 +20,15 @@
       AudioContext, so the browser tab's recording indicator actually goes away
 - [ ] Listening test
 
+## Audio file input (added)
+- [x] Load a file (picker or drag-and-drop), decode, play it through the same chain
+- [x] Transport: play/pause (`p`), stop, loop, clickable progress bar, time readout
+- [x] Mic / file input switch; file mode never requests microphone permission
+- [x] Play auto-starts the engine, so Start is not a prerequisite
+- [x] Format check: AAC `.m4a` decodes; Apple Lossless `.m4a` does not (Chrome limitation),
+      with a targeted error message instead of a generic format list
+- [ ] Listening test
+
 ## Phase 2 - the actual Messina trick
 - [ ] Live pitch detection (YIN / autocorrelation) so keys become absolute notes, not intervals,
       and the chord chart stops depending on the "I'm singing" setting being true
@@ -58,6 +67,19 @@ wrap / arrows / delete) verified by dispatching key events.
 MediaStream in the page: start -> button reads Stop, sample rate populates, space allocates 3 voices
 for Am, a manual key makes 4; stop -> voices 0, meter 0, mic track `.stop()` called, context closed,
 button back to Start; restart and a second stop both clean. No console errors.
+
+**Audio file source:** verified with a generated 10 s WAV fed to the file input, and playback
+started with a real mouse click (a scripted `.click()` is not a user gesture, so the AudioContext
+stays suspended and the transport looks frozen - worth remembering when testing audio in the
+browser). Playhead and meter advance, the chord gate allocates 3 voices over playback and releases
+them without interrupting it, `p` pauses and resumes from the pause point, seeking keeps playing,
+stop rewinds, and `getUserMedia` was called zero times in file mode.
+
+**Bug found by that test:** pause and seek both called `stop()` on the buffer source while an
+`endingDeliberately` flag guarded the `onended` handler - but `onended` fires asynchronously, so the
+flag was already back to `false` when the event arrived and every deliberate stop looked like the
+file had ended, resetting playback to zero. Fixed by clearing `onended` before stopping the node
+rather than guarding it with a flag.
 
 **Verified in Chrome:** worklet loads and renders in a real (Offline)AudioContext, +7 semitones out
 at exactly 329.63 Hz, UI renders, zero console errors. Live-mic listening test still pending - it

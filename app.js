@@ -1,12 +1,12 @@
 /**
  * Messina - phase 1.
  *
- * mic -> inputGain -+-> dryGain ----------------------+-> mixBus -+-> masterGain -> out
- *                   |                                 |           |
- *                   +-> [8 x shifter -> voiceGain] -> harmonyGain +-> convolver -> wetGain -^
+ * source -+-> inputGain -+-> dryGain ---------------------+-> mixBus -+-> masterGain -> out
+ *         |              |                                |           |
+ *  mic or file           +-> [8 x shifter -> voiceGain] -> harmonyGain +-> convolver -> wetGain -^
  *
- * Two ways to drive it: hold keys for individual intervals, or load a chord
- * chart and tap space to step through it.
+ * The source is either the live mic or a loaded audio file; everything
+ * downstream is identical, so the keys and the chord chart work on both.
  */
 import { parseProgression, chordVoices, NOTE_NAMES } from './chords.js';
 
@@ -26,13 +26,24 @@ const $ = (id) => document.getElementById(id);
 const semitonesFor = new Map(KEY_MAP);
 const held = new Map();      // voice id -> voice
 const keyEls = new Map();    // keyboard key -> element
+
 let voices = [];
 let ctx = null;
 let nodes = null;
-let stream = null;           // mic tracks, so stop() can switch the input off
+let running = false;
 let meterRaf = null;
 let octave = 0;
 let muted = false;
+
+let sourceMode = 'mic';
+let micStream = null;
+let micNode = null;
+
+let fileBuffer = null;       // decoded PCM, survives a stop/start
+let fileNode = null;
+let filePlaying = false;
+let fileOffset = 0;          // where playback resumes from, seconds
+let fileStartedAt = 0;       // ctx.currentTime when the current node started
 
 let chart = [];              // [{ token, chord }]
 let nextIndex = 0;           // chord queued for the next press
@@ -91,83 +102,102 @@ function impulseResponse(context, seconds = 2.2, decay = 2.6) {
   return ir;
 }
 
+async function buildGraph() {
+  ctx = new AudioContext({ latencyHint: 'interactive' });
+  await ctx.audioWorklet.addModule('pitch-shifter.js');
+  await ctx.resume();
+
+  const input = ctx.createGain();
+  const dry = ctx.createGain();
+  const harmony = ctx.createGain();
+  const mix = ctx.createGain();
+  const convolver = ctx.createConvolver();
+  const wet = ctx.createGain();
+  const master = ctx.createGain();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  convolver.buffer = impulseResponse(ctx);
+
+  input.connect(analyser);
+  input.connect(dry).connect(mix);
+  harmony.connect(mix);
+  mix.connect(master);
+  mix.connect(convolver).connect(wet).connect(master);
+  master.connect(ctx.destination);
+
+  voices = Array.from({ length: VOICE_COUNT }, () => {
+    const shifter = new AudioWorkletNode(ctx, 'pitch-shifter', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      outputChannelCount: [1],
+    });
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    input.connect(shifter).connect(gain).connect(harmony);
+    return { shifter, gain, id: null };
+  });
+
+  nodes = { input, dry, harmony, mix, wet, master, analyser };
+  for (const name of Object.keys(sliders)) sliders[name](Number($(name).value));
+
+  $('sr').textContent = ctx.sampleRate + ' Hz';
+  const rt = (ctx.baseLatency + (ctx.outputLatency || 0)) * 1000;
+  $('latency').textContent = rt ? rt.toFixed(1) + ' ms' : 'unknown';
+  meterLoop(analyser);
+}
+
+async function connectMic() {
+  if (micNode) return;
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 1,
+    },
+  });
+  micNode = ctx.createMediaStreamSource(micStream);
+  micNode.connect(nodes.input);
+}
+
+function disconnectMic() {
+  micNode?.disconnect();
+  micNode = null;
+  micStream?.getTracks().forEach((track) => track.stop());
+  micStream = null;
+}
+
 async function start() {
   $('start').disabled = true;
-  $('status').textContent = 'Requesting microphone...';
-
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 1,
-      },
-    });
+    if (!ctx) {
+      $('status').textContent = sourceMode === 'mic' ? 'Requesting microphone...' : 'Starting...';
+      await buildGraph();
+    }
+    if (sourceMode === 'mic') await connectMic();
 
-    ctx = new AudioContext({ latencyHint: 'interactive' });
-    await ctx.audioWorklet.addModule('pitch-shifter.js');
-    await ctx.resume();
-
-    const source = ctx.createMediaStreamSource(stream);
-    const input = ctx.createGain();
-    const dry = ctx.createGain();
-    const harmony = ctx.createGain();
-    const mix = ctx.createGain();
-    const convolver = ctx.createConvolver();
-    const wet = ctx.createGain();
-    const master = ctx.createGain();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-
-    convolver.buffer = impulseResponse(ctx);
-
-    source.connect(input);
-    input.connect(analyser);
-    input.connect(dry).connect(mix);
-    harmony.connect(mix);
-    mix.connect(master);
-    mix.connect(convolver).connect(wet).connect(master);
-    master.connect(ctx.destination);
-
-    voices = Array.from({ length: VOICE_COUNT }, () => {
-      const shifter = new AudioWorkletNode(ctx, 'pitch-shifter', {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        channelCount: 1,
-        channelCountMode: 'explicit',
-        outputChannelCount: [1],
-      });
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      input.connect(shifter).connect(gain).connect(harmony);
-      return { shifter, gain, id: null };
-    });
-
-    nodes = { input, dry, harmony, mix, wet, master, analyser };
-    for (const name of Object.keys(sliders)) sliders[name](Number($(name).value));
-
+    running = true;
     $('start').textContent = 'Stop';
     $('start').classList.add('running');
-    $('start').disabled = false;
-    $('status').textContent = 'Running - sing and hold keys';
-    $('sr').textContent = ctx.sampleRate + ' Hz';
-    const rt = (ctx.baseLatency + (ctx.outputLatency || 0)) * 1000;
-    $('latency').textContent = rt ? rt.toFixed(1) + ' ms' : 'unknown';
-
-    meterLoop(analyser);
+    $('status').textContent = sourceMode === 'mic'
+      ? 'Running - sing and hold keys'
+      : 'Running - press play';
+    updateTransport();
   } catch (err) {
     console.error(err);
     $('status').textContent = 'Failed: ' + err.message;
-    $('start').disabled = false;
-    stream = null;
+    disconnectMic();
   }
+  $('start').disabled = false;
 }
 
 /** Tear the rig down: silence every voice, release the mic, close the context. */
 async function stop() {
   $('start').disabled = true;
 
+  stopFile();
   cancelAnimationFrame(meterRaf);
   meterRaf = null;
 
@@ -182,15 +212,16 @@ async function stop() {
   voices = [];
   held.clear();
   muted = false;
+  running = false;
 
-  stream?.getTracks().forEach((track) => track.stop());
-  stream = null;
+  disconnectMic();
   await dying?.close();
 
   $('meter').style.width = '0%';
-  $('sr').textContent = '\u2014';
-  $('latency').textContent = '\u2014';
+  $('sr').textContent = '—';
+  $('latency').textContent = '—';
   updateVoiceCount();
+  updateTransport();
   $('status').textContent = 'Stopped';
   $('start').textContent = 'Start';
   $('start').classList.remove('running');
@@ -204,10 +235,178 @@ function meterLoop(analyser) {
     let sum = 0;
     for (const s of data) sum += s * s;
     $('meter').style.width = Math.min(100, Math.sqrt(sum / data.length) * 320).toFixed(1) + '%';
+    if (filePlaying) renderPlayhead();
     meterRaf = requestAnimationFrame(tick);
   };
   tick();
 }
+
+/* ---------- audio file source ---------- */
+
+/** Decode without disturbing the live graph - works even before Start. */
+async function decodeFile(arrayBuffer) {
+  const decoder = ctx ?? new AudioContext();
+  try {
+    return await decoder.decodeAudioData(arrayBuffer);
+  } finally {
+    if (decoder !== ctx) decoder.close();
+  }
+}
+
+/**
+ * Chrome decodes AAC .m4a but not Apple Lossless, and the two share an
+ * extension, so "try an m4a" is useless advice after an m4a has just failed.
+ */
+function decodeHint(name) {
+  if (/\.m4a$/i.test(name)) {
+    console.info('Convert Apple Lossless to AAC:  afconvert -f m4af -d aac in.m4a out.m4a');
+    return 'if it is Apple Lossless, Chrome cannot read it - re-encode it as AAC '
+         + '(see the console for a one-line afconvert command)';
+  }
+  return 'Chrome cannot read this format - WAV, MP3, AAC/M4A, FLAC and OGG all work';
+}
+
+async function loadFile(file) {
+  if (!file) return;
+  $('fileName').textContent = 'Decoding ' + file.name + '...';
+  try {
+    fileBuffer = await decodeFile(await file.arrayBuffer());
+    stopFile();
+    $('fileName').textContent = `${file.name} · ${formatTime(fileBuffer.duration)}`;
+    selectSource('file');
+  } catch (err) {
+    console.error(err);
+    fileBuffer = null;
+    $('fileName').textContent = `Could not decode ${file.name} - ${decodeHint(file.name)}`;
+  }
+  updateTransport();
+}
+
+function fileTime() {
+  if (!fileBuffer) return 0;
+  if (!filePlaying) return fileOffset;
+  const elapsed = ctx.currentTime - fileStartedAt;
+  return $('loop').checked
+    ? elapsed % fileBuffer.duration
+    : Math.min(elapsed, fileBuffer.duration);
+}
+
+async function playFile(from = fileOffset) {
+  if (!fileBuffer) return;
+  if (!running) await start();
+  if (!ctx) return;
+
+  stopFileNode();
+  fileNode = ctx.createBufferSource();
+  fileNode.buffer = fileBuffer;
+  fileNode.loop = $('loop').checked;
+  fileNode.connect(nodes.input);
+  fileNode.onended = () => {                     // only fires when the file runs out
+    filePlaying = false;
+    fileOffset = 0;
+    updateTransport();
+    renderPlayhead();
+  };
+  fileNode.start(0, Math.min(from, fileBuffer.duration - 0.01));
+  fileStartedAt = ctx.currentTime - from;
+  filePlaying = true;
+  updateTransport();
+}
+
+function stopFileNode() {
+  if (!fileNode) return;
+  // Drop the handler first: onended fires asynchronously, so a flag cleared here
+  // would already be false by the time a deliberate stop delivered its event,
+  // and pausing or seeking would look like the file had ended.
+  fileNode.onended = null;
+  try { fileNode.stop(); } catch { /* already stopped */ }
+  fileNode.disconnect();
+  fileNode = null;
+}
+
+function pauseFile() {
+  if (!filePlaying) return;
+  fileOffset = fileTime();
+  stopFileNode();
+  filePlaying = false;
+  updateTransport();
+}
+
+function stopFile() {
+  stopFileNode();
+  filePlaying = false;
+  fileOffset = 0;
+  updateTransport();
+  renderPlayhead();
+}
+
+function seekFile(seconds) {
+  if (!fileBuffer) return;
+  const t = Math.max(0, Math.min(seconds, fileBuffer.duration));
+  if (filePlaying) playFile(t);
+  else { fileOffset = t; renderPlayhead(); }
+}
+
+function togglePlay() {
+  if (!fileBuffer) return;
+  if (filePlaying) pauseFile();
+  else playFile();
+}
+
+function formatTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function renderPlayhead() {
+  const duration = fileBuffer?.duration ?? 0;
+  const t = fileTime();
+  $('playhead').style.width = duration ? (t / duration * 100).toFixed(2) + '%' : '0%';
+  $('time').textContent = `${formatTime(t)} / ${formatTime(duration)}`;
+}
+
+function updateTransport() {
+  $('playPause').disabled = !fileBuffer;
+  $('rewind').disabled = !fileBuffer;
+  $('playPause').textContent = filePlaying ? 'Pause' : 'Play';
+}
+
+function selectSource(mode) {
+  sourceMode = mode;
+  document.querySelector(`input[name=source][value=${mode}]`).checked = true;
+  $('fileControls').hidden = mode !== 'file';
+
+  if (mode === 'mic') {
+    pauseFile();
+    if (running) connectMic().catch((err) => {
+      console.error(err);
+      $('status').textContent = 'Failed: ' + err.message;
+    });
+  } else {
+    disconnectMic();
+  }
+}
+
+$('file').addEventListener('change', (e) => loadFile(e.target.files[0]));
+$('playPause').addEventListener('click', togglePlay);
+$('rewind').addEventListener('click', stopFile);
+$('loop').addEventListener('change', () => { if (fileNode) fileNode.loop = $('loop').checked; });
+$('progress').addEventListener('click', (e) => {
+  const box = e.currentTarget.getBoundingClientRect();
+  seekFile((e.clientX - box.left) / box.width * (fileBuffer?.duration ?? 0));
+});
+for (const radio of document.querySelectorAll('input[name=source]')) {
+  radio.addEventListener('change', () => selectSource(radio.value));
+}
+
+const panel = $('sourcePanel');
+panel.addEventListener('dragover', (e) => { e.preventDefault(); panel.classList.add('dragging'); });
+panel.addEventListener('dragleave', () => panel.classList.remove('dragging'));
+panel.addEventListener('drop', (e) => {
+  e.preventDefault();
+  panel.classList.remove('dragging');
+  loadFile(e.dataTransfer.files[0]);
+});
 
 /* ---------- voices ---------- */
 
@@ -314,6 +513,8 @@ function releaseChord() {
 $('chart').value = DEFAULT_CHART;
 $('chart').addEventListener('input', loadChart);
 loadChart();
+updateTransport();
+renderPlayhead();
 
 /* ---------- keyboard ---------- */
 
@@ -340,6 +541,11 @@ window.addEventListener('keydown', (e) => {
     if (!e.repeat && playingIndex === null) soundChord();
     return;
   }
+  if (key === 'p') {                             // transport
+    e.preventDefault();
+    if (!e.repeat) togglePlay();
+    return;
+  }
   if (key === 'arrowleft' || key === 'arrowright') {
     e.preventDefault();                          // move the cue without sounding
     if (!e.repeat) queueChord(nextIndex + (key === 'arrowleft' ? -1 : 1));
@@ -351,7 +557,7 @@ window.addEventListener('keydown', (e) => {
     playingIndex = null;
     nextIndex = 0;
     renderChart();
-    $('status').textContent = ctx ? 'Chart rewound' : 'Not running';
+    $('status').textContent = running ? 'Chart rewound' : 'Not running';
     return;
   }
   if (e.repeat) return;
@@ -393,4 +599,4 @@ window.addEventListener('blur', () => {
   }
 });
 
-$('start').addEventListener('click', () => (ctx ? stop() : start()));
+$('start').addEventListener('click', () => (running ? stop() : start()));

@@ -49,6 +49,27 @@
     text-transform: uppercase;
   }
   button.running { background: #c4564b; color: #f6e9e7; }
+  button.small {
+    background: #1d222a; color: var(--text); border: 1px solid var(--line);
+    padding: 6px 14px; font-size: 13px;
+  }
+  button.small:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .filebtn {
+    display: inline-block; cursor: pointer;
+    background: #1d222a; border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 14px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .filebtn:hover { border-color: var(--accent); color: var(--accent); }
+  .sources { display: flex; gap: 16px; }
+  .sources label { cursor: pointer; color: var(--muted); }
+  .sources input { accent-color: var(--accent); margin-right: 5px; }
+  .sources label:has(input:checked) { color: var(--text); }
+  .progress {
+    height: 8px; background: #000; border-radius: 4px; margin-top: 12px;
+    cursor: pointer; position: relative;
+  }
+  .progress > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; }
+  #sourcePanel.dragging { border-color: var(--accent); background: #1a150c; }
   button:disabled { opacity: .4; cursor: default; }
   .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .status { color: var(--muted); }
@@ -126,6 +147,33 @@
       <span class="status" id="status">Not running</span>
     </div>
     <div class="meter"><i id="meter"></i></div>
+  </div>
+
+  <div class="panel" id="sourcePanel">
+    <div class="row" style="justify-content: space-between">
+      <strong>Input</strong>
+      <div class="sources">
+        <label><input type="radio" name="source" value="mic" checked>Microphone</label>
+        <label><input type="radio" name="source" value="file">Audio file</label>
+      </div>
+    </div>
+    <div id="fileControls" hidden>
+      <div class="row" style="margin-top: 14px">
+        <label class="filebtn">Choose file<input type="file" id="file" accept="audio/*" hidden></label>
+        <span class="hint" id="fileName">No file loaded &mdash; or drop one anywhere on this panel</span>
+      </div>
+      <div class="row" style="margin-top: 12px">
+        <button class="small" id="playPause" disabled>Play</button>
+        <button class="small" id="rewind" disabled>Stop</button>
+        <label class="hint"><input type="checkbox" id="loop" checked style="accent-color: var(--accent)"> loop</label>
+        <span class="hint" id="time">0:00 / 0:00</span>
+      </div>
+      <div class="progress" id="progress"><i id="playhead"></i></div>
+      <p class="sub" style="margin: 12px 0 0">
+        <kbd>p</kbd> plays and pauses. Everything below works on the file exactly as it does on the
+        mic &mdash; hold keys or step the chart while it plays.
+      </p>
+    </div>
   </div>
 
   <div class="panel">
