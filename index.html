@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Messina</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #15181d;
+    --line: #262b33;
+    --text: #e6e8ec;
+    --muted: #868e9c;
+    --accent: #d8a657;
+    --accent-dim: #6b5326;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 20px; letter-spacing: .18em; text-transform: uppercase; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .warn {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+    background: #1a150c;
+  }
+  button {
+    font: inherit;
+    color: #0d0f12;
+    background: var(--accent);
+    border: 0;
+    border-radius: 6px;
+    padding: 10px 20px;
+    cursor: pointer;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  button.running { background: #c4564b; color: #f6e9e7; }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .status { color: var(--muted); }
+
+  .meter { height: 6px; background: #000; border-radius: 3px; overflow: hidden; margin-top: 14px; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 60ms linear; }
+
+  .keys { display: flex; gap: 4px; flex-wrap: wrap; }
+  .key {
+    width: 46px; height: 62px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: #101318;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 2px;
+  }
+  .key.black { background: #05070a; }
+  .key.on { background: var(--accent); border-color: var(--accent); color: #0d0f12; }
+  .key b { font-size: 15px; text-transform: uppercase; }
+  .key span { font-size: 10px; color: var(--muted); }
+  .key.on span { color: #3d2f12; }
+
+  label.slider { display: grid; grid-template-columns: 90px 1fr 48px; align-items: center; gap: 12px; margin-bottom: 10px; }
+  label.slider:last-child { margin-bottom: 0; }
+  label.slider span:last-child { color: var(--muted); text-align: right; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  textarea {
+    width: 100%; min-height: 70px; resize: vertical;
+    font: inherit; color: var(--text);
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px; line-height: 1.7;
+  }
+  textarea:focus { outline: 1px solid var(--accent-dim); }
+  select {
+    font: inherit; color: var(--text);
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+  }
+  .progression { display: flex; gap: 6px; overflow-x: auto; padding: 14px 0 4px; }
+  .chord {
+    flex: 0 0 auto; min-width: 74px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: #101318;
+    text-align: center; cursor: pointer;
+  }
+  .chord b { display: block; font-size: 16px; }
+  .chord span { font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .chord.on { background: var(--accent); border-color: var(--accent); color: #0d0f12; }
+  .chord.next { border-color: var(--accent); color: var(--accent); }
+  .chord.on span { color: #3d2f12; }
+  .chord.bad { border-color: #7a2f2f; color: #d98b8b; }
+  .hint { color: var(--muted); }
+
+  dl { display: grid; grid-template-columns: auto auto; gap: 4px 16px; margin: 0; color: var(--muted); }
+  dd { margin: 0; color: var(--text); }
+  kbd {
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 5px; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Messina</h1>
+  <p class="sub">Live vocal harmonizer &mdash; mic in, laptop keyboard as the controller.</p>
+
+  <div class="panel warn">
+    Wear headphones. Speakers + an open mic will feed back. Master starts low &mdash; bring it up slowly.
+    <kbd>esc</kbd> mutes everything instantly.
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <button id="start">Start</button>
+      <span class="status" id="status">Not running</span>
+    </div>
+    <div class="meter"><i id="meter"></i></div>
+  </div>
+
+  <div class="panel">
+    <div class="keys" id="keys"></div>
+    <p class="sub" style="margin:14px 0 0">
+      Hold keys to stack harmonies. <kbd>z</kbd> / <kbd>x</kbd> shift the whole row an octave
+      (<span id="octave">0</span>). Each key is an <em>interval</em>, so harmonies follow your melody.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content: space-between; margin-bottom: 12px">
+      <strong>Chord chart</strong>
+      <label class="hint">I'm singing <select id="reference"></select></label>
+    </div>
+    <textarea id="chart" spellcheck="false" aria-label="Chord chart"></textarea>
+    <div class="progression" id="progression"></div>
+    <p class="sub" style="margin:10px 0 0">
+      Hold <kbd>space</kbd> to sound the cued chord; let go to drop it and cue the next one.
+      <kbd>&larr;</kbd> <kbd>&rarr;</kbd> move the cue, <kbd>delete</kbd> rewinds, or click any
+      chord to cue it. Bar lines and line breaks are ignored, so paste straight from a tab.
+      Numbers under each chord are the semitone shifts it will use.
+    </p>
+  </div>
+
+  <div class="panel">
+    <label class="slider"><span>Dry</span><input type="range" id="dry" min="0" max="1.5" step="0.01" value="1"><span id="dryV">1.00</span></label>
+    <label class="slider"><span>Harmony</span><input type="range" id="harmony" min="0" max="1.5" step="0.01" value="0.8"><span id="harmonyV">0.80</span></label>
+    <label class="slider"><span>Reverb</span><input type="range" id="reverb" min="0" max="1" step="0.01" value="0.25"><span id="reverbV">0.25</span></label>
+    <label class="slider"><span>Master</span><input type="range" id="master" min="0" max="1" step="0.01" value="0.35"><span id="masterV">0.35</span></label>
+  </div>
+
+  <div class="panel">
+    <dl>
+      <dt>Sample rate</dt><dd id="sr">&mdash;</dd>
+      <dt>Round-trip latency</dt><dd id="latency">&mdash;</dd>
+      <dt>Voices</dt><dd id="voices">0 / 8</dd>
+    </dl>
+  </div>
+</main>
+<script src="app.js" type="module"></script>
+</body>
+</html>
