@@ -14,8 +14,12 @@ No dependencies, no build step, no framework. Five files and a static server.
 
 ```sh
 cd messina
-python3 -m http.server 8173
+python3 serve.py 8173
 ```
+
+(`serve.py` is `http.server` with `Cache-Control: no-store` bolted on. Chrome
+happily caches ES modules and AudioWorklets, which after an edit serves stale
+code that looks exactly like a bug in the new code.)
 
 Then open <http://localhost:8173> **in Chrome, wearing headphones.** Localhost
 counts as a secure context, so the mic works without TLS. Speakers plus an open
@@ -71,19 +75,33 @@ than silently dropped.
 Other controls: `p` plays/pauses a loaded file, `esc` mutes, and the sliders set
 dry / harmony / reverb / master.
 
-## The catch
+## Your voice
 
-**There is no pitch detection yet, so the tool does not know what note you are
-singing.** A chord symbol is absolute — `Am` means A, C, E — but all the shifter
-can do is transpose your voice by intervals. The **"I'm singing"** dropdown is
-how you close that gap: it tells the tool what pitch to voice chords against.
-Chords are in tune only if you actually hold roughly that note. Pick something
-comfortable, find it on a tuner or piano, set the dropdown, and drone.
+The tool tracks the pitch you are singing (YIN, ~sub-cent on steady notes) and
+shows it live. Three switches govern what it does with that:
 
-The same limitation applies to the manual keys: they are intervals, so harmonies
-follow your melody around instead of staying on a chord.
+- **Follow my pitch** — on, a chord symbol means real notes: `Am` is A, C and E
+  wherever your voice happens to be. Off, the keys and chart become fixed
+  intervals again and voice themselves against the fallback pitch dropdown.
+- **Preserve formants** — on is PSOLA; off is the old resampler. Flip it while
+  holding a chord: off is the chipmunk sound, kept deliberately for comparison.
+- **Fold octaves** — on moves every harmony to the octave nearest your voice, so
+  nothing shifts more than six semitones and everything stays smooth. Off keeps
+  the written voicing (root nearest your voice, the rest stacked above, slash
+  bass below), which is faithful to a transcription but rougher at the edges.
 
-Live pitch tracking is the next thing to build, and it removes all of this.
+**Range** trades pitch tracking against delay. The analysis has to hold about two
+cycles of the lowest note you want found, and PSOLA needs a pitch period either
+side of each pulse, so the engine's delay follows directly from the lowest note:
+
+| Range | Lowest note | Measured engine delay |
+| --- | --- | --- |
+| tightest | C3 (131 Hz) | 20.6 ms |
+| default | E2 (82 Hz) | 29.7 ms |
+| most delay | C2 (65 Hz) | 36.1 ms |
+
+The dry path is delayed to match, so the dry voice and its harmonies stay
+aligned rather than flamming.
 
 ## How it works
 
@@ -96,29 +114,52 @@ mic or file ─► inputGain ─┬─► dryGain ──────────
 
 | File | Role |
 | --- | --- |
-| `pitch-shifter.js` | `AudioWorkletProcessor` — one voice of real-time pitch shifting |
+| `engine.js` | the `AudioWorkletProcessor`: pitch tracking and all eight voices |
 | `chords.js` | chord-symbol parsing and voicing |
 | `app.js` | audio graph, input sources, transport, keyboard, chart control |
 | `index.html` | markup and styles |
-| `test-pitch-shifter.js` | offline DSP check |
+| `test-engine.js` | offline DSP checks |
+| `serve.py` | no-cache dev server |
 
-Each voice is a **variable delay line with a splice crossfade**. Input is written
-to a ring buffer at 1×; a read head's delay drifts at `(1 - ratio)` samples per
-sample, which resamples the signal by `ratio` and therefore transposes it. The
-delay can only drift so far before it has to jump, so it wraps every 40 ms, and
-the wrap is hidden by a 6 ms crossfade with a second head exactly one grain
-behind — at the wrap both heads read the same position, so the splice is seamless.
+**Pitch tracking** is YIN with the difference function built from an FFT
+autocorrelation (the textbook O(W²) form is far too slow for a worklet), run once
+per 256-sample hop and shared by all eight voices. Confidence comes from YIN's
+aperiodicity: below threshold — consonants, breath, silence — the engine holds
+the last pitch rather than lurching, and ducks the harmonies ~6 dB.
 
-The first version instead overlapped two heads 50% of the time with sin²/cos²
-windows. That measured rms 0.500 where a unit sine should give 0.707, and a
-narrow-band DFT found more energy in a 5–12 Hz warble sideband than in the
-carrier: the two incoherent heads were cancelling the note. The single-head
-design fixed both.
+**Shifting** is TD-PSOLA. The engine marks each glottal pulse (predict one period
+ahead, then snap to the local waveform peak), then rebuilds the signal by laying
+those pulses down at a new spacing: closer together to raise the pitch, further
+apart to lower it. Because each grain is copied unmodified, the spectral envelope
+— the formants, the thing that makes your voice sound like *you* — comes along
+untouched. That is the whole trick, and it is why this stopped sounding like
+chipmunks.
 
-The cost of splicing is that harmonies far from unison get rougher, because the
-crossfade occupies more of each grain period — roughly 4% of the time at a third,
-15% at an octave, 30% at +19 semitones. Thirds and fifths sound smooth; the
-extremes sound crunchy. That is inherent to this class of shifter.
+Grain width matters more than it looks. A grain is sized to the *shorter* of the
+analysis and synthesis periods, not simply to the analysis period. Shifting up
+packs synthesis marks closer together than the analysis marks, so full-width
+grains stack several copies of the same waveform offset by less than one period
+— and since the waveform repeats every period, those copies partly cancel.
+Measured, that cost 3.6 dB at an octave and 8.4 dB at +19 semitones, heard as
+harmonies thinning out as they go higher. Sizing grains to the synthesis period
+keeps neighbours at a clean 50% overlap and holds the level within ~1.2 dB
+across the range; `test-engine.js` asserts it.
+
+The old algorithm is still in there as `resample` mode behind the formant
+toggle. It is a variable delay line: input written at 1×, read by a head drifting
+at `(1 - ratio)`, wrapping every 40 ms with a 6 ms splice crossfade against a head
+one grain behind. That resamples, which is a tape speed-up, which scales pitch
+and formants together.
+
+`test-engine.js` measures the difference rather than asserting it: it builds a
+synthetic voice (glottal impulse train through three formant resonators), shifts
+it up an octave both ways, and finds the frequency scale factor that best aligns
+each output's spectral envelope with the source's. PSOLA comes out at **×1.01**;
+resampling at **×2.05**. The resample case is asserted to fail the formant test —
+if it ever passes, the test has stopped measuring what it claims to.
+
+Eight PSOLA voices cost about **4.8% of the audio render budget** (measured, 20×
+faster than real time), so the DSP is not where latency comes from.
 
 Reverb is a `ConvolverNode` fed a JS-generated impulse response (decaying noise),
 so there is no audio asset to download.
@@ -126,23 +167,33 @@ so there is no audio asset to download.
 ## Tests
 
 ```sh
-/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test-pitch-shifter.js
+/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test-engine.js
 ```
 
-Runs the real worklet under a small shim — no browser, no mic, no dependencies —
-pushing a 220 Hz sine through a range of intervals and measuring the output from
-interpolated zero crossings. Clean windows land on the target pitch to 0.00 cents.
-It also reports each interval's splice duty, which is the honest predictor of how
-rough that interval will sound.
+Runs the real worklet under a small shim — no browser, no mic, no dependencies:
+YIN accuracy on sines and on synthetic voices (sub-cent), PSOLA pitch accuracy
+across intervals, the differential formant test above, and continuity checks for
+NaNs, sample-level discontinuities and level.
 
-Note that windows straddling a splice read tens of cents off; that is expected,
-which is why the assertion is on clean windows and on carrier level.
+## Latency
+
+Worth knowing where it actually comes from, because it is mostly not this code:
+
+- **Bluetooth output is the dominant term.** Measured on AirPods:
+  `outputLatency` 171 ms against `baseLatency` 5.3 ms. Wired headphones cut that
+  by roughly tenfold. No amount of DSP work touches it.
+- **The engine adds 20–36 ms**, set by the range selector, and that cost is
+  algorithmic — two pitch periods of lookahead. It would be identical in C++.
+- **The DSP itself is free**: 4.8% of the render budget for eight voices.
+
+For a loaded audio file none of this matters much — there is no live voice to
+flam against, so a constant delay is imperceptible.
 
 ## Roadmap
 
-- Live pitch detection (YIN / autocorrelation) so keys and chords become absolute
-  notes and the "I'm singing" setting disappears
+- Offline pitch analysis for loaded files (bigger window, smoothing that can see
+  forwards in time, no added delay — a file can be analysed ahead of playback)
 - Chord latch / freeze, so a chord holds hands-free
 - Per-voice detune and stereo spread
-- Delay, filter, formant control
+- MIDI / MusicXML import to fill the chord chart
 - Real MIDI input via Web MIDI

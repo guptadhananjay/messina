@@ -70,6 +70,14 @@
   }
   .progress > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; }
   #sourcePanel.dragging { border-color: var(--accent); background: #1a150c; }
+  .pitch { display: flex; align-items: baseline; gap: 14px; }
+  .pitch b { font-size: 34px; letter-spacing: .04em; min-width: 76px; }
+  .conf { height: 4px; background: #000; border-radius: 2px; margin-top: 12px; }
+  .conf > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width 80ms linear; }
+  .switches { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 16px; }
+  .switches label { color: var(--muted); cursor: pointer; display: flex; align-items: center; gap: 8px; }
+  .switches input[type=checkbox] { accent-color: var(--accent); }
+  .switches label:has(input:checked) { color: var(--text); }
   button:disabled { opacity: .4; cursor: default; }
   .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .status { color: var(--muted); }
@@ -149,6 +157,34 @@
     <div class="meter"><i id="meter"></i></div>
   </div>
 
+  <div class="panel">
+    <div class="row" style="justify-content: space-between">
+      <strong>Your voice</strong>
+      <label class="hint">Range
+        <select id="range">
+          <option value="low">down to C3 &middot; tightest</option>
+          <option value="standard" selected>down to E2 &middot; default</option>
+          <option value="full">down to C2 &middot; most delay</option>
+        </select>
+      </label>
+    </div>
+    <div class="pitch" style="margin-top: 12px">
+      <b id="pitch">&mdash;</b>
+      <span class="hint" id="cents">no pitch detected</span>
+    </div>
+    <div class="conf"><i id="confidence"></i></div>
+    <div class="switches">
+      <label><input type="checkbox" id="tracking" checked>Follow my pitch</label>
+      <label><input type="checkbox" id="formants" checked>Preserve formants</label>
+      <label><input type="checkbox" id="fold" checked>Fold octaves</label>
+    </div>
+    <p class="sub" style="margin: 12px 0 0">
+      With <em>follow my pitch</em> on, chords are real notes rather than intervals.
+      Turn <em>preserve formants</em> off to hear the old resampling shifter &mdash; that's the
+      chipmunk sound, kept for comparison.
+    </p>
+  </div>
+
   <div class="panel" id="sourcePanel">
     <div class="row" style="justify-content: space-between">
       <strong>Input</strong>
@@ -210,6 +246,7 @@
     <dl>
       <dt>Sample rate</dt><dd id="sr">&mdash;</dd>
       <dt>Round-trip latency</dt><dd id="latency">&mdash;</dd>
+      <dt>Engine delay</dt><dd id="engineDelay">&mdash;</dd>
       <dt>Voices</dt><dd id="voices">0 / 8</dd>
     </dl>
   </div>

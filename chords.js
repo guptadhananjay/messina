@@ -159,3 +159,40 @@ export function chordVoices(chord, reference = 0, maxVoices = 8) {
 }
 
 export const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+/**
+ * Chord -> absolute MIDI notes, placed around the note you are actually
+ * singing. Phase 1 could only return intervals because nothing knew your pitch;
+ * with detection, `referenceMidi` is measured rather than guessed.
+ *
+ * `fold` moves every note to the octave nearest your voice, so no harmony is
+ * transposed more than six semitones. That trades the written voicing for
+ * quality, which is the right trade for a vocal stack: the further a voice is
+ * shifted, the rougher it sounds. With `fold` off, the chord keeps its stacked
+ * shape - root nearest your voice, the rest above it, slash bass below.
+ */
+export function chordNotes(chord, referenceMidi, options = {}) {
+  const { fold = true, maxVoices = 8 } = options;
+  const ref = Math.round(referenceMidi);
+
+  const nearest = (pc, target) => {
+    let d = (((pc - target) % 12) + 12) % 12;
+    if (d > 6) d -= 12;
+    return target + d;
+  };
+
+  const rootMidi = nearest(chord.root, ref);
+  let notes = chord.intervals.map((i) => rootMidi + i);
+  if (chord.bass !== null) notes.unshift(nearest(chord.bass, ref - 12));
+  if (fold) notes = notes.map((n) => nearest(((n % 12) + 12) % 12, ref));
+
+  return [...new Set(notes)]
+    .map((n) => Math.max(24, Math.min(96, n)))
+    .slice(0, maxVoices);
+}
+
+/** MIDI note number -> "A#3", for the readouts. */
+export function noteName(midi) {
+  const m = Math.round(midi);
+  return NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+}

@@ -1,14 +1,18 @@
 /**
  * Messina - phase 1.
  *
- * source -+-> inputGain -+-> dryGain ---------------------+-> mixBus -+-> masterGain -> out
+ * source -+-> inputGain -+-> dryDelay -> dryGain ---------+-> mixBus -+-> masterGain -> out
  *         |              |                                |           |
- *  mic or file           +-> [8 x shifter -> voiceGain] -> harmonyGain +-> convolver -> wetGain -^
+ *  mic or file           +-> engine (8 voices) ---------> harmonyGain +-> convolver -> wetGain -^
  *
  * The source is either the live mic or a loaded audio file; everything
  * downstream is identical, so the keys and the chord chart work on both.
+ *
+ * The engine delays its harmonies by a fixed amount (PSOLA needs a grain either
+ * side of each pitch mark), so the dry path is delayed to match - otherwise the
+ * harmonies flam against the dry signal.
  */
-import { parseProgression, chordVoices, NOTE_NAMES } from './chords.js';
+import { parseProgression, chordVoices, chordNotes, noteName, NOTE_NAMES } from './chords.js';
 
 const VOICE_COUNT = 8;
 const RAMP = 0.015;          // key attack/release, seconds
@@ -27,7 +31,7 @@ const semitonesFor = new Map(KEY_MAP);
 const held = new Map();      // voice id -> voice
 const keyEls = new Map();    // keyboard key -> element
 
-let voices = [];
+let engine = null;
 let ctx = null;
 let nodes = null;
 let running = false;
@@ -44,6 +48,18 @@ let fileNode = null;
 let filePlaying = false;
 let fileOffset = 0;          // where playback resumes from, seconds
 let fileStartedAt = 0;       // ctx.currentTime when the current node started
+
+let tracking = true;         // follow the detected pitch, vs the fixed dropdown
+let fold = true;             // move harmonies to the octave nearest the voice
+let formants = true;         // psola vs the phase 1 resampler
+let range = 'standard';
+let detected = { f0: 0, confidence: 0, voiced: false };
+
+const RANGES = {
+  low:      { window: 1024, fmin: 131, label: 'C3' },
+  standard: { window: 2048, fmin: 82,  label: 'E2' },
+  full:     { window: 4096, fmin: 65,  label: 'C2' },
+};
 
 let chart = [];              // [{ token, chord }]
 let nextIndex = 0;           // chord queued for the next press
@@ -104,10 +120,11 @@ function impulseResponse(context, seconds = 2.2, decay = 2.6) {
 
 async function buildGraph() {
   ctx = new AudioContext({ latencyHint: 'interactive' });
-  await ctx.audioWorklet.addModule('pitch-shifter.js');
+  await ctx.audioWorklet.addModule('engine.js');
   await ctx.resume();
 
   const input = ctx.createGain();
+  const dryDelay = ctx.createDelay(0.5);
   const dry = ctx.createGain();
   const harmony = ctx.createGain();
   const mix = ctx.createGain();
@@ -119,27 +136,24 @@ async function buildGraph() {
   convolver.buffer = impulseResponse(ctx);
 
   input.connect(analyser);
-  input.connect(dry).connect(mix);
+  input.connect(dryDelay).connect(dry).connect(mix);
   harmony.connect(mix);
   mix.connect(master);
   mix.connect(convolver).connect(wet).connect(master);
   master.connect(ctx.destination);
 
-  voices = Array.from({ length: VOICE_COUNT }, () => {
-    const shifter = new AudioWorkletNode(ctx, 'pitch-shifter', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      channelCount: 1,
-      channelCountMode: 'explicit',
-      outputChannelCount: [1],
-    });
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-    input.connect(shifter).connect(gain).connect(harmony);
-    return { shifter, gain, id: null };
+  engine = new AudioWorkletNode(ctx, 'messina-engine', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    channelCount: 1,
+    channelCountMode: 'explicit',
+    outputChannelCount: [1],
   });
+  engine.port.onmessage = (e) => onEngineStatus(e.data);
+  input.connect(engine).connect(harmony);
 
-  nodes = { input, dry, harmony, mix, wet, master, analyser };
+  nodes = { input, dryDelay, dry, harmony, mix, wet, master, analyser };
+  sendConfig();
   for (const name of Object.keys(sliders)) sliders[name](Number($(name).value));
 
   $('sr').textContent = ctx.sampleRate + ' Hz';
@@ -209,7 +223,7 @@ async function stop() {
   const dying = ctx;
   ctx = null;
   nodes = null;
-  voices = [];
+  engine = null;
   held.clear();
   muted = false;
   running = false;
@@ -410,28 +424,24 @@ panel.addEventListener('drop', (e) => {
 
 /* ---------- voices ---------- */
 
-function voiceOn(id, semitones) {
+/**
+ * `note` is an absolute MIDI number when the engine is tracking your pitch, and
+ * a semitone offset when it is not. The engine owns voice allocation now; the
+ * app only tracks which ids are sounding so the UI can count them.
+ */
+function voiceOn(id, note) {
   if (!ctx || held.has(id)) return;
-  const voice = voices.find((v) => v.id === null) || voices[0];
-  if (voice.id !== null) voiceOff(voice.id);
-
-  voice.id = id;
-  voice.shifter.parameters.get('ratio').value = Math.pow(2, semitones / 12);
-  voice.gain.gain.cancelScheduledValues(ctx.currentTime);
-  voice.gain.gain.setTargetAtTime(1, ctx.currentTime, RAMP);
-
-  held.set(id, voice);
+  engine.port.postMessage(tracking
+    ? { type: 'noteOn', id, midi: note }
+    : { type: 'noteOn', id, semis: note });
+  held.set(id, note);
   updateVoiceCount();
 }
 
 function voiceOff(id) {
-  const voice = held.get(id);
-  if (!voice) return;
-  if (!ctx) { voice.id = null; held.delete(id); updateVoiceCount(); return; }
-  voice.gain.gain.cancelScheduledValues(ctx.currentTime);
-  voice.gain.gain.setTargetAtTime(0, ctx.currentTime, RAMP);
-  voice.id = null;
+  if (!held.has(id)) return;
   held.delete(id);
+  engine?.port.postMessage({ type: 'noteOff', id });
   updateVoiceCount();
 }
 
@@ -441,6 +451,67 @@ function releaseChordVoices() {
 
 function updateVoiceCount() {
   $('voices').textContent = `${held.size} / ${VOICE_COUNT}`;
+}
+
+/* ---------- engine control ---------- */
+
+function sendConfig() {
+  if (!engine) return;
+  const r = RANGES[range];
+  engine.port.postMessage({
+    type: 'config',
+    mode: formants ? 'psola' : 'resample',
+    absolute: tracking,
+    window: r.window,
+    fmin: r.fmin,
+  });
+}
+
+let lastPreviewRef = null;
+
+function onEngineStatus(msg) {
+  if (msg.type !== 'status' || !running) return;   // a final message can land mid-teardown
+  detected = { f0: msg.f0, confidence: msg.confidence, voiced: msg.voiced };
+  if (nodes) nodes.dryDelay.delayTime.value = msg.delayMs / 1000;
+  $('engineDelay').textContent = msg.delayMs.toFixed(1) + ' ms';
+  renderPitch();
+
+  // The chart previews the notes each chord would sound, which depends on the
+  // pitch you are singing - refresh it when that changes, but only then, since
+  // status arrives ~23 times a second.
+  const ref = referenceMidi();
+  if (ref !== lastPreviewRef && playingIndex === null) {
+    lastPreviewRef = ref;
+    renderChart();
+  }
+}
+
+/** The note you are singing right now, as a MIDI number, or null. */
+function detectedMidi() {
+  if (!detected.voiced || detected.f0 <= 0) return null;
+  return 69 + 12 * Math.log2(detected.f0 / 440);
+}
+
+/** What chords voice themselves against: your actual pitch, or the fallback. */
+function referenceMidi() {
+  const live = detectedMidi();
+  if (tracking && live !== null) return Math.round(live);
+  return 48 + reference;                      // C3 + the fallback pitch class
+}
+
+function renderPitch() {
+  const live = detectedMidi();
+  if (live === null) {
+    $('pitch').textContent = '\u2014';
+    $('cents').textContent = tracking ? 'no pitch detected' : 'tracking off';
+  } else {
+    const near = Math.round(live);
+    const off = Math.round((live - near) * 100);
+    $('pitch').textContent = noteName(near);
+    $('cents').textContent = (off >= 0 ? '+' : '') + off + ' cents \u00b7 '
+      + detected.f0.toFixed(1) + ' Hz';
+  }
+  $('confidence').style.width = Math.round(detected.confidence * 100) + '%';
 }
 
 /* ---------- chord chart ---------- */
@@ -465,14 +536,21 @@ function renderChart() {
       + (entry.chord ? '' : ' bad')
       + (i === playingIndex ? ' on' : '')
       + (i === nextIndex && playingIndex === null ? ' next' : '');
-    const detail = entry.chord
-      ? chordVoices(entry.chord, reference, VOICE_COUNT)
-          .map((s) => (s >= 0 ? '+' : '') + s).join(' ')
-      : 'unknown';
+    const detail = entry.chord ? describeChord(entry.chord) : 'unknown';
     el.innerHTML = `<b>${entry.token}</b><span>${detail}</span>`;
     el.addEventListener('click', () => { queueChord(i); });   // click to cue, don't sound
     strip.appendChild(el);
   });
+}
+
+/** Note names when we know your pitch, semitone offsets when we don't. */
+function describeChord(chord) {
+  if (tracking) {
+    return chordNotes(chord, referenceMidi(), { fold, maxVoices: VOICE_COUNT })
+      .map(noteName).join(' ');
+  }
+  return chordVoices(chord, reference, VOICE_COUNT)
+    .map((s) => (s >= 0 ? '+' : '') + s).join(' ');
 }
 
 function queueChord(index) {
@@ -495,8 +573,12 @@ function soundChord(index = nextIndex) {
     $('status').textContent = `Can't read "${entry.token}" - skipped`;
     return;
   }
-  chordVoices(entry.chord, reference, VOICE_COUNT)
-    .forEach((semis, i) => voiceOn(`chord:${i}`, semis));
+  // The octave is decided here, once, from the pitch at the moment you trigger
+  // the chord - folding continuously would make voices jump mid-phrase.
+  const notes = tracking
+    ? chordNotes(entry.chord, referenceMidi(), { fold, maxVoices: VOICE_COUNT })
+    : chordVoices(entry.chord, reference, VOICE_COUNT);
+  notes.forEach((n, i) => voiceOn(`chord:${i}`, n));
   $('status').textContent = `${entry.token}  (${playingIndex + 1}/${chart.length})`;
 }
 
@@ -517,6 +599,19 @@ updateTransport();
 renderPlayhead();
 
 /* ---------- keyboard ---------- */
+
+/** A key press is an absolute note while tracking, an interval otherwise. */
+function keyNote(offset) {
+  if (!tracking) return Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, offset));
+  const ref = referenceMidi();
+  if (fold) {
+    const pc = ((offset % 12) + 12) % 12;
+    let d = (((pc - ref) % 12) + 12) % 12;
+    if (d > 6) d -= 12;
+    return ref + d;
+  }
+  return 48 + offset;
+}
 
 function typing(target) {
   return target && (target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
@@ -572,8 +667,7 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   if (e.target.tagName === 'INPUT') e.target.blur();
 
-  const semis = Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, semitonesFor.get(key) + octave * 12));
-  voiceOn('key:' + key, semis);
+  voiceOn('key:' + key, keyNote(semitonesFor.get(key) + octave * 12));
   keyEls.get(key)?.classList.add('on');
 });
 
@@ -597,6 +691,24 @@ window.addEventListener('blur', () => {
       keyEls.get(id.slice(4))?.classList.remove('on');
     }
   }
+});
+
+for (const [id, set] of [
+  ['tracking', (v) => { tracking = v; }],
+  ['formants', (v) => { formants = v; }],
+  ['fold', (v) => { fold = v; }],
+]) {
+  $(id).addEventListener('change', () => {
+    set($(id).checked);
+    sendConfig();
+    renderPitch();
+    renderChart();
+  });
+}
+
+$('range').addEventListener('change', () => {
+  range = $('range').value;
+  sendConfig();
 });
 
 $('start').addEventListener('click', () => (running ? stop() : start()));

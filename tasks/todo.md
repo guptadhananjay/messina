@@ -29,13 +29,63 @@
       with a targeted error message instead of a generic format list
 - [ ] Listening test
 
-## Phase 2 - the actual Messina trick
-- [ ] Live pitch detection (YIN / autocorrelation) so keys become absolute notes, not intervals,
-      and the chord chart stops depending on the "I'm singing" setting being true
+## Phase 2 - pitch tracking + formant-preserving shifting (done)
+- [x] `engine.js`: one worklet, one analysis, eight voices, port-driven
+- [x] YIN pitch detection via FFT autocorrelation (sub-cent on sines and synthetic voices)
+- [x] TD-PSOLA synthesis with epoch marking and window-sum normalised overlap-add
+- [x] `resample` mode kept behind a formant toggle for A/B and as a test control
+- [x] Absolute notes for keys and chart; octave folding decided at note-on; fallback pitch
+- [x] Configurable voice range (C3 / E2 / C2) trading tracking depth against delay
+- [x] Dry path delayed to match the engine so harmonies don't flam
+- [x] Confidence gating: hold pitch and duck harmonies on unvoiced sounds
+- [x] `serve.py` with no-store, after stale cached modules wasted debugging time
+- [x] Fix harmonies thinning out at higher intervals (grain width, see below)
+- [ ] Listening test with a real voice
+
+## Phase 3 - candidates
+- [ ] Offline pitch analysis for loaded files (no added delay, better tracking)
 - [ ] Chord latch / freeze (hold a chord hands-free)
 - [ ] Per-voice detune + stereo spread
-- [ ] Delay, filter, formant control
+- [ ] MIDI / MusicXML import to fill the chord chart
 - [ ] Real MIDI input via Web MIDI
+
+## Phase 2 review
+
+**The measurement that matters.** `test-engine.js` builds a synthetic voice (glottal impulse
+train through three formant resonators at 700/1220/2600 Hz), shifts it up an octave through both
+engines, and finds the frequency scale factor that best aligns each output's spectral envelope
+with the source's. PSOLA: **x1.01** (correlation 0.98). Resample: **x2.05** (0.99). That is the
+chipmunk effect quantified and removed. The resample case is asserted to *fail* the formant test,
+so the test cannot silently stop measuring the thing it claims to.
+
+**Two measurement bugs before that worked.** The pitch estimator picked the tallest ACF peak,
+which sits at 2T as often as T, so it reported an octave low; fixed by preferring the earliest lag
+that correlates nearly as well. And the envelope extractor averaged a harmonic comb in the linear
+domain, which leaves ripple at the comb period, so its "formant peaks" were just harmonics; fixed
+with a max filter one f0 wide before smoothing. Both looked like engine bugs and were not.
+
+**Measured, not assumed.** Engine delay 20.6 / 29.7 / 36.1 ms for the three ranges (the plan
+predicted 11 / 21 / 43). Eight PSOLA voices cost 4.8% of the render budget - 20x faster than real
+time - which settles the question of whether this needs C++: it does not. The dominant latency
+term is Bluetooth output (171 ms measured on AirPods vs 5.3 ms base).
+
+**Level drop at higher intervals (user-reported).** Harmonies got quieter the further up they
+were shifted: measured -3.6 dB at an octave, -4.5 dB at a fifth, -8.4 dB at +19, while `resample`
+mode stayed flat within 0.7 dB. Cause: grains were two analysis periods wide, but shifting up
+packs synthesis marks closer than analysis marks, so several copies of the same waveform landed on
+top of each other offset by less than a period and partly cancelled - while the window-sum
+normalisation still divided by the full overlap, as if they had added coherently. Fixed by sizing
+each grain to min(analysis period, synthesis period), so neighbours overlap 50% instead of piling
+up. Level now holds within 1.2 dB from -12 to +19 (verified offline and in Chrome), formant
+preservation unchanged at x1.01, and `test-engine.js` gained a level-flatness assertion that fails
+above 3 dB.
+
+Two alternatives were measured and rejected: energy-style normalisation (divide by the root of the
+summed squares) was worse at 6.7 dB, and leaving it alone was 8.4 dB.
+
+**Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
+"the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`
+sending `no-store`.
 
 ## Review
 
