@@ -40,6 +40,7 @@
 - [x] Confidence gating: hold pitch and duck harmonies on unvoiced sounds
 - [x] `serve.py` with no-store, after stale cached modules wasted debugging time
 - [x] Fix harmonies thinning out at higher intervals (grain width, see below)
+- [x] Arrow keys change the sounding chord while space is held, wrapping at the ends
 - [ ] Listening test with a real voice
 
 ## Phase 3 - candidates
@@ -82,6 +83,13 @@ above 3 dB.
 
 Two alternatives were measured and rejected: energy-style normalisation (divide by the root of the
 summed squares) was worse at 6.7 dB, and leaving it alone was 8.4 dB.
+
+**Seamless chord changes.** Arrows now retarget the sounding voices (same voice ids, new notes)
+rather than releasing and retriggering them, so the engine keeps each voice's grain stream running
+and glides the ratio over ~11 ms. Retriggering also exposed a latent click: the engine rebuilt a
+voice's grain state whenever it was inactive, which cut the tail off a voice still ramping down.
+It now only rebuilds a genuinely idle voice. `test-engine.js` asserts the change is gap-free
+(rms 0.327 before, 0.320 across the change), click-free, and lands on the new note.
 
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`

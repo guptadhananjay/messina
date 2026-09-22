@@ -63,8 +63,11 @@ Dm7  E7  Am
 ```
 
 Then **hold space** to sound the cued chord and **let go** to drop it and cue the
-next one. `←` `→` move the cue without making sound, `delete` rewinds to the top,
-and clicking any chord cues it. The numbers under each chord are the semitone
+next one. **While space is held, `←` `→` move the sounding chord straight to the
+next one**, wrapping round at the end, so a whole progression can be played
+without ever letting go — the voices are retargeted rather than retriggered, so
+the change is gap-free. With nothing held those arrows just move the cue.
+`delete` rewinds to the top, and clicking any chord cues it. The numbers under each chord are the semitone
 shifts it will use.
 
 Recognized symbols cover what charts actually print: `Am`, `F#m7`, `Cmaj7`, `G7`,

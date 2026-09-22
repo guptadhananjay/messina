@@ -438,6 +438,20 @@ function voiceOn(id, note) {
   updateVoiceCount();
 }
 
+/**
+ * Point an already-sounding voice at a new note. The engine keeps that voice's
+ * grain stream running and glides the ratio, so changing chord mid-hold doesn't
+ * restart the voice - which is what makes arrow-key changes seamless.
+ */
+function voiceSet(id, note) {
+  if (!ctx) return;
+  if (!held.has(id)) { voiceOn(id, note); return; }
+  engine.port.postMessage(tracking
+    ? { type: 'noteOn', id, midi: note }
+    : { type: 'noteOn', id, semis: note });
+  held.set(id, note);
+}
+
 function voiceOff(id) {
   if (!held.has(id)) return;
   held.delete(id);
@@ -568,8 +582,8 @@ function soundChord(index = nextIndex) {
   renderChart();
   $('progression').children[playingIndex]?.scrollIntoView({ block: 'nearest', inline: 'center' });
 
-  releaseChordVoices();
   if (!entry.chord) {
+    releaseChordVoices();
     $('status').textContent = `Can't read "${entry.token}" - skipped`;
     return;
   }
@@ -578,7 +592,10 @@ function soundChord(index = nextIndex) {
   const notes = tracking
     ? chordNotes(entry.chord, referenceMidi(), { fold, maxVoices: VOICE_COUNT })
     : chordVoices(entry.chord, reference, VOICE_COUNT);
-  notes.forEach((n, i) => voiceOn(`chord:${i}`, n));
+  notes.forEach((n, i) => voiceSet(`chord:${i}`, n));
+  for (const id of [...held.keys()]) {          // drop voices this chord doesn't use
+    if (id.startsWith('chord:') && Number(id.slice(6)) >= notes.length) voiceOff(id);
+  }
   $('status').textContent = `${entry.token}  (${playingIndex + 1}/${chart.length})`;
 }
 
@@ -642,8 +659,13 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (key === 'arrowleft' || key === 'arrowright') {
-    e.preventDefault();                          // move the cue without sounding
-    if (!e.repeat) queueChord(nextIndex + (key === 'arrowleft' ? -1 : 1));
+    e.preventDefault();
+    if (e.repeat) return;
+    const step = key === 'arrowleft' ? -1 : 1;
+    // While space is held the arrows change the sounding chord, so you can move
+    // through a progression without ever letting go. Both wrap at the ends.
+    if (playingIndex !== null) soundChord(playingIndex + step);
+    else queueChord(nextIndex + step);
     return;
   }
   if (key === 'backspace') {                     // back to the top of the chart

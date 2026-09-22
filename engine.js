@@ -156,7 +156,9 @@ class MessinaEngine extends AudioWorkletProcessor {
           || this.voices.find((v) => !v.active)
           || this.voices[0];
         if (voice.id !== null && voice.id !== msg.id) voice.gainTarget = 0;
-        const fresh = !voice.active;
+        // Only rebuild the grain stream for a genuinely idle voice: doing it to
+        // one still ramping down would cut its tail dead and click.
+        const fresh = !voice.active && voice.gain < 1e-3;
         voice.id = msg.id;
         voice.active = true;
         voice.midi = msg.midi ?? null;

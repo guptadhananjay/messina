@@ -311,6 +311,56 @@ check(resampScale.scale > 1.7, 'resample drags formants (control)',
       'envelope moved x' + resampScale.scale.toFixed(2) +
       ' (want ~x2.00, match ' + resampScale.corr.toFixed(2) + ')');
 
+/* ---------- 4b. changing chord mid-hold ---------- */
+
+print('-- chord change while held --');
+(function () {
+  // Arrow keys retarget a sounding voice instead of releasing and retriggering
+  // it. Verify that switching note mid-stream leaves no gap and no click.
+  var sig = syntheticVoice(150, 1.4);
+  var p = new Processor();
+  p.onMessage({ type: 'config', mode: 'psola', absolute: false, window: 2048, fmin: 82 });
+  p.onMessage({ type: 'noteOn', id: 'chord:0', semis: 0 });
+
+  var out = new Float32Array(sig.length), block = 128;
+  var switchAt = Math.floor(SR * 0.7);
+  for (var i = 0; i + block <= sig.length; i += block) {
+    if (i <= switchAt && i + block > switchAt) {
+      p.onMessage({ type: 'noteOn', id: 'chord:0', semis: 5 });   // same id: retarget
+    }
+    var a = new Float32Array(block), o = new Float32Array(block);
+    a.set(sig.subarray(i, i + block));
+    p.process([[a]], [[o]], {});
+    out.set(o, i);
+  }
+
+  function windowRms(from, len) {
+    var s = 0;
+    for (var i = from; i < from + len; i++) s += out[i] * out[i];
+    return Math.sqrt(s / len);
+  }
+  var before = windowRms(switchAt - Math.floor(SR * 0.05), Math.floor(SR * 0.04));
+  var during = windowRms(switchAt, Math.floor(SR * 0.03));
+  var after = windowRms(switchAt + Math.floor(SR * 0.08), Math.floor(SR * 0.04));
+
+  var maxStep = 0, peak = 0;
+  for (var j = switchAt - 2000; j < switchAt + 4000; j++) {
+    peak = Math.max(peak, Math.abs(out[j]));
+    maxStep = Math.max(maxStep, Math.abs(out[j] - out[j - 1]));
+  }
+
+  check(during > before * 0.5, 'no gap when the chord changes',
+        'rms before ' + before.toFixed(3) + ', across the change ' + during.toFixed(3) +
+        ', after ' + after.toFixed(3));
+  check(maxStep < peak * 0.5, 'no click when the chord changes',
+        'largest step ' + maxStep.toFixed(3) + ' vs peak ' + peak.toFixed(3));
+
+  var got = estimateF0(out, switchAt + Math.floor(SR * 0.2));
+  var want = 150 * Math.pow(2, 5 / 12);
+  check(Math.abs(cents(got, want)) < 25, 'lands on the new note',
+        'want ' + want.toFixed(1) + ' Hz, got ' + got.toFixed(1) + ' Hz');
+})();
+
 /* ---------- 5. continuity ---------- */
 
 print('-- continuity --');
