@@ -77,7 +77,14 @@ shorthand like `C-7`, `CM7`, `CΔ`. Anything unparseable is outlined in red rath
 than silently dropped.
 
 Other controls: `p` plays/pauses a loaded file, `esc` mutes, and the sliders set
-dry / harmony / reverb / master.
+dry / harmony / spread / detune / reverb / master.
+
+**Spread** pans the harmony voices apart, from centred (0) to hard left and right
+(1); the first two voices take the outside edges, so even a triad is wide.
+**Detune** nudges each voice sharp or flat by up to that many cents, left voices
+one way and right voices the other, as a doubler would, which thickens the
+stack. Together they give the wide, shimmering stack Prismizer is known for; both
+at zero is the old centred, dead-in-tune sound. The dry voice stays centred.
 
 ## Your voice
 
@@ -112,8 +119,8 @@ aligned rather than flamming.
 ```
 mic or file ─► inputGain ─┬─► dryGain ─────────────┐
                   │                                │
-                  └─► [8 × shifter → voiceGain] ─► harmonyGain ─┬─► mixBus ─► master ─► out
-                                                                └─► convolver ─► wetGain ─┘
+                  └─► [8 × shifter → pan] ─(stereo)─► harmonyGain ─┬─► mixBus ─► master ─► out
+                                                                   └─► convolver ─► wetGain ─┘
 ```
 
 | File | Role |
@@ -130,6 +137,17 @@ autocorrelation (the textbook O(W²) form is far too slow for a worklet), run on
 per 256-sample hop and shared by all eight voices. Confidence comes from YIN's
 aperiodicity: below threshold — consonants, breath, silence — the engine holds
 the last pitch rather than lurching, and ducks the harmonies ~6 dB.
+
+Vocal fry or a rough onset makes alternate glottal pulses unequal, which doubles
+the true period, so YIN reports an octave low. Because the analysis window is
+43 ms wide, a 30 ms glitch reads that way for ~50 ms, and every tracked harmony
+used to drop an octave with it. The tell is that the old period still fits:
+YIN's dip there stays below 0.26 through such a glitch, but sits above 1.27 when
+the voice really has gone down an octave. So a reading at twice the current period
+is sent back whenever the current one still fits. Any other leap of a fifth or
+more has to repeat for ~21 ms before it is believed. After ~100 ms of silence
+the first reading is trusted outright, since a new phrase can start anywhere.
+Real octave leaps are still followed, up in 52 ms and down in 36 ms.
 
 **Shifting** is TD-PSOLA. The engine marks each glottal pulse (predict one period
 ahead, then snap to the local waveform peak), then rebuilds the signal by laying
@@ -185,8 +203,9 @@ so there is no audio asset to download.
 
 Runs the real worklet under a small shim — no browser, no mic, no dependencies:
 YIN accuracy on sines and on synthetic voices (sub-cent), PSOLA pitch accuracy
-across intervals, the differential formant test above, and continuity checks for
-NaNs, sample-level discontinuities and level.
+across intervals, the differential formant test above, stereo spread and detune,
+octave glitches ignored while real octave leaps are followed, and continuity
+checks for NaNs, sample-level discontinuities and level.
 
 ## Latency
 
@@ -207,6 +226,5 @@ flam against, so a constant delay is imperceptible.
 - Offline pitch analysis for loaded files (bigger window, smoothing that can see
   forwards in time, no added delay — a file can be analysed ahead of playback)
 - Chord latch / freeze, so a chord holds hands-free
-- Per-voice detune and stereo spread
 - MIDI / MusicXML import to fill the chord chart
 - Real MIDI input via Web MIDI

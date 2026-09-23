@@ -49,7 +49,8 @@
 ## Phase 3 - candidates
 - [ ] Offline pitch analysis for loaded files (no added delay, better tracking)
 - [ ] Chord latch / freeze (hold a chord hands-free)
-- [ ] Per-voice detune + stereo spread
+- [x] Per-voice detune + stereo spread
+- [x] Pitch tracking holds through octave glitches (vocal fry) but follows real leaps
 - [ ] MIDI / MusicXML import to fill the chord chart
 - [ ] Real MIDI input via Web MIDI
 
@@ -123,6 +124,23 @@ Chrome with real key presses: the dropdown keeps its value, the checkbox stays t
 Start, and the chord sounds each time. Chrome on macOS doesn't give focus to a mouse-clicked button,
 so the Stop case only happened via Tab. Keys pressed before Start now say so, instead of lighting a
 silent key.
+
+**Stereo spread, detune, octave glitches.** The engine now outputs stereo. Each voice slot has a fixed
+pan position and detune direction, scaled by the Spread and Detune sliders. Pan is equal-power scaled
+by sqrt(2), so spread 0 reproduces the old mono output exactly (asserted), and full spread keeps total
+power within 0.00 dB. Detune lands at +10.0 cents when asked for +10. Verified in Chrome with the real
+worklet in an OfflineAudioContext: spread 0 gives L/R correlation 1.000, spread 1 gives -0.002 with
+two voices, and the defaults (0.6, 6 cents) give 0.596, all at the same level. Offline-render gotcha:
+port messages are not synchronised with an OfflineAudioContext, so a noteOn posted before
+startRendering can land after the render has finished, which gives silent output. Suspend, post, then
+resume.
+
+Octave glitches: the test first reproduced the bug, with a 30 ms burst of alternating pulse amplitudes
+throwing the tracked pitch a full 12 semitones. A leap-confirmation window alone did not fix it,
+because the 43 ms analysis window stretches a 30 ms glitch to ~50 ms of octave-low readings. Measuring
+YIN's dip at the old period separated the cases cleanly (glitch <= 0.26, real low note >= 1.27), so
+octave-low readings snap back when the old period still fits (threshold 0.5). Now 0.0 semitones of
+excursion. Real octave leaps are followed in 52 ms (up; 36 ms before this change) and 36 ms (down).
 
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`

@@ -39,13 +39,19 @@ function resonator(x, freq, bw) {
 
 /** A crude but honest voice: glottal impulse train through three formants. */
 function syntheticVoice(f0, seconds, formants) {
-  formants = formants || [700, 1220, 2600];
   var n = Math.floor(SR * seconds);
   var x = new Float32Array(n);
   var period = SR / f0, next = 0;
   for (var i = 0; i < n; i++) {
     if (i >= next) { x[i] = 1; next += period; }
   }
+  return voiceFrom(x, formants);
+}
+
+/** Paint formants onto any excitation, normalised to a peak of 1. */
+function voiceFrom(x, formants) {
+  formants = formants || [700, 1220, 2600];
+  var n = x.length;
   var out = new Float32Array(n);
   for (var f = 0; f < formants.length; f++) {
     var band = resonator(x, formants[f], 90 + f * 40);
@@ -74,14 +80,23 @@ function runEngine(signal, opts) {
   if (opts.midi !== undefined) p.onMessage({ type: 'noteOn', id: 'v0', midi: opts.midi });
   else if (opts.semis !== undefined) p.onMessage({ type: 'noteOn', id: 'v0', semis: opts.semis });
 
-  var out = new Float32Array(signal.length), block = 128;
+  if (opts.spread !== undefined || opts.detune !== undefined) {
+    p.onMessage({ type: 'config', spread: opts.spread || 0, detune: opts.detune || 0 });
+  }
+
+  // Mono by default, as the level and pitch tests were written; `stereo` hands
+  // the engine two output channels, the way the browser does.
+  var out = new Float32Array(signal.length), right = new Float32Array(signal.length);
+  var block = 128;
   for (var i = 0; i + block <= signal.length; i += block) {
     var inBuf = new Float32Array(block), outBuf = new Float32Array(block);
+    var outR = new Float32Array(block);
     inBuf.set(signal.subarray(i, i + block));
-    p.process([[inBuf]], [[outBuf]], {});
+    p.process([[inBuf]], [opts.stereo ? [outBuf, outR] : [outBuf]], {});
     out.set(outBuf, i);
+    right.set(outR, i);
   }
-  return { out: out, engine: p };
+  return { out: out, right: right, engine: p };
 }
 
 /* ---------- measurement (independent of the implementation) ---------- */
@@ -391,6 +406,100 @@ print('-- chord change while held --');
   var want = 150 * Math.pow(2, 5 / 12);
   check(Math.abs(cents(got, want)) < 25, 'lands on the new note',
         'want ' + want.toFixed(1) + ' Hz, got ' + got.toFixed(1) + ' Hz');
+})();
+
+/* ---------- 4c. stereo spread and detune ---------- */
+
+print('-- stereo spread and detune --');
+(function () {
+  var sig = syntheticVoice(150, 1.0);
+  var from = Math.floor(SR * 0.4);
+  function energy(x) {
+    var e = 0;
+    for (var i = from; i < x.length; i++) e += x[i] * x[i];
+    return e;
+  }
+  function db(a, b) { return 10 * Math.log(a / b) / Math.LN10; }
+
+  // Spread 0 must be exactly the old centred mono in both ears.
+  var centred = runEngine(sig, { mode: 'psola', semis: 7, stereo: true, spread: 0 });
+  var mono = runEngine(sig, { mode: 'psola', semis: 7 });
+  var maxDiff = 0;
+  for (var i = from; i < sig.length; i++) {
+    maxDiff = Math.max(maxDiff, Math.abs(centred.out[i] - centred.right[i]),
+                       Math.abs(centred.out[i] - mono.out[i]));
+  }
+  check(maxDiff < 1e-6, 'spread 0 is centred mono', 'largest L/R/mono difference ' + maxDiff.toExponential(1));
+
+  // The first voice sits hard left at full spread, at the same total power.
+  var wide = runEngine(sig, { mode: 'psola', semis: 7, stereo: true, spread: 1 });
+  var lr = db(energy(wide.out) + 1e-12, energy(wide.right) + 1e-12);
+  var power = db(energy(wide.out) + energy(wide.right),
+                 energy(centred.out) + energy(centred.right));
+  check(lr > 30, 'full spread pans a voice to one side', 'left ' + lr.toFixed(1) + ' dB over right');
+  check(Math.abs(power) < 0.5, 'panning keeps total power', 'power change ' + power.toFixed(2) + ' dB');
+
+  // Detune nudges each voice by its own small offset; the first voice goes sharp.
+  var detuned = runEngine(sig, { mode: 'psola', semis: 7, detune: 10 });
+  var want = 150 * Math.pow(2, 7 / 12);
+  var got = estimateF0(detuned.out, from);
+  var off = cents(got, want);
+  check(off > 7 && off < 13, 'detune shifts the voice by its offset',
+        'want +10 cents, got ' + (off >= 0 ? '+' : '') + off.toFixed(1));
+})();
+
+/* ---------- 4d. pitch tracking holds through octave glitches ---------- */
+
+print('-- octave glitches --');
+(function () {
+  // Vocal fry or a rough onset makes alternate glottal pulses unequal, which
+  // doubles the true period for a moment - YIN then reports an octave low, and
+  // every tracked harmony dropped an octave with it. A real leap must still be
+  // followed, so this checks both.
+  function trace(sig) {
+    var p = new Processor();
+    p.onMessage({ type: 'config', mode: 'psola', absolute: true, window: 2048, fmin: 82 });
+    var f = [], block = 128;
+    for (var i = 0; i + block <= sig.length; i += block) {
+      var a = new Float32Array(block);
+      a.set(sig.subarray(i, i + block));
+      p.process([[a]], [[new Float32Array(block)]], {});
+      f.push(p.f0);
+    }
+    return f;
+  }
+  function excitation(seconds, periodAt, ampAt) {
+    var n = Math.floor(SR * seconds), x = new Float32Array(n), next = 0, k = 0;
+    for (var i = 0; i < n; i++) {
+      if (i >= next) { x[i] = ampAt(i, k++); next += periodAt(i); }
+    }
+    return voiceFrom(x);
+  }
+  var T = SR / 200;
+  var g0 = Math.floor(SR * 0.5), g1 = Math.floor(SR * 0.53);
+
+  var glitchy = excitation(1.0, function () { return T; },
+    function (i, k) { return i >= g0 && i < g1 && k % 2 ? 0.5 : 1; });
+  var f = trace(glitchy), worst = 0;
+  for (var b = Math.floor(SR * 0.3 / 128); b < f.length; b++) {
+    worst = Math.max(worst, Math.abs(12 * Math.log(f[b] / 200) / Math.LN2));
+  }
+  check(worst < 3, 'a 30 ms octave glitch does not move the pitch',
+        'furthest excursion ' + worst.toFixed(1) + ' semitones from 200 Hz');
+
+  var leapAt = Math.floor(SR * 0.5);
+  [['up', 400, T / 2], ['down', 100, T * 2]].forEach(function (c) {
+    var leap = excitation(1.0, function (i) { return i < leapAt ? T : c[2]; },
+      function () { return 1; });
+    var f2 = trace(leap), landed = -1;
+    for (var b2 = Math.floor(leapAt / 128); b2 < f2.length; b2++) {
+      if (Math.abs(12 * Math.log(f2[b2] / c[1]) / Math.LN2) < 0.5) { landed = b2; break; }
+    }
+    var ms = landed < 0 ? Infinity : (landed * 128 - leapAt) / SR * 1000;
+    check(ms < 80, 'a real octave leap ' + c[0] + ' is followed',
+          landed < 0 ? 'never reached ' + c[1] + ' Hz'
+                     : 'reached ' + c[1] + ' Hz ' + ms.toFixed(0) + ' ms after the leap');
+  });
 })();
 
 /* ---------- 5. continuity ---------- */

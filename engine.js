@@ -29,6 +29,16 @@ const F_MAX = 1000;              // highest f0 we look for
 const VOICED_CONFIDENCE = 0.45;
 const UNVOICED_DUCK = 0.5;       // harmonies drop ~6 dB on consonants
 const PSOLA_FLOOR = 0.5;         // below an octave down, PSOLA grains stop overlapping
+const JUMP_SEMIS = 7;            // a pitch leap this big must prove itself...
+const JUMP_CONFIRM = 4;          // ...by holding for this many hops (~21 ms)
+const REACQUIRE_HOPS = 20;       // after ~100 ms unvoiced, trust the first reading
+const OCTAVE_RESCUE = 0.5;       // YIN dip at the old period that still counts as that pitch
+
+// Where each voice slot sits at full spread (-1 left, 1 right) and which way
+// it detunes. Opposite sides detune opposite ways, as a doubler would, and the
+// order fills outwards so a three-note chord is already wide.
+const VOICE_PAN = [-1, 1, -0.5, 0.5, -0.75, 0.75, -0.25, 0.25];
+const VOICE_DETUNE = [1, -1, 0.5, -0.5, 0.75, -0.75, 0.25, -0.25];
 
 /** Iterative radix-2 complex FFT with precomputed twiddles. */
 class FFT {
@@ -91,11 +101,16 @@ class MessinaEngine extends AudioWorkletProcessor {
 
     this.mode = 'psola';
     this.absolute = true;
+    this.spread = 0;                 // 0 centred .. 1 fully spread
+    this.detune = 0;                 // cents at a voice's full offset
 
     this.f0 = 0;
     this.confidence = 0;
     this.voiced = false;
     this.duck = 1;
+    this.unvoicedHops = REACQUIRE_HOPS;
+    this.pendingTau = 0;
+    this.pendingCount = 0;
 
     this.marks = new Float64Array(MAX_MARKS);
     this.markHead = 0;
@@ -116,6 +131,7 @@ class MessinaEngine extends AudioWorkletProcessor {
         id: null, active: false, midi: null, semis: 0,
         gain: 0, gainTarget: 0, ratio: 1, ratioTarget: 1,
         nextOut: 0, delayPos: 0, blend: 1,
+        pan: VOICE_PAN[i], detune: VOICE_DETUNE[i], gainL: 1, gainR: 1,
         acc: new Float32Array(ACC), wsum: new Float32Array(ACC),
       });
     }
@@ -151,6 +167,7 @@ class MessinaEngine extends AudioWorkletProcessor {
     this.markInit = false;
     this.markCount = 0;
     this.markHead = 0;
+    this.unvoicedHops = REACQUIRE_HOPS;          // T0 was just reset: don't judge leaps against it
   }
 
   onMessage(msg) {
@@ -189,6 +206,8 @@ class MessinaEngine extends AudioWorkletProcessor {
       case 'config':
         if (msg.mode) this.mode = msg.mode;
         if (typeof msg.absolute === 'boolean') this.absolute = msg.absolute;
+        if (typeof msg.spread === 'number') this.spread = Math.max(0, Math.min(1, msg.spread));
+        if (typeof msg.detune === 'number') this.detune = Math.max(0, Math.min(50, msg.detune));
         if (msg.window && msg.fmin && (msg.window !== this.W || msg.fmin !== this.fmin)) {
           this.configure(msg.window, msg.fmin);
         }
@@ -213,6 +232,8 @@ class MessinaEngine extends AudioWorkletProcessor {
 
   /** YIN, with the difference function built from an FFT autocorrelation. */
   analyse() {
+    const reacquire = this.unvoicedHops >= REACQUIRE_HOPS;
+    this.unvoicedHops++;
     const W = this.W, N = this.N, re = this.re, im = this.im, pre = this.prefix;
     re.fill(0);
     im.fill(0);
@@ -270,9 +291,61 @@ class MessinaEngine extends AudioWorkletProcessor {
     this.confidence = Math.max(0, Math.min(1, 1 - cmnd[tauEst]));
     this.voiced = this.confidence >= VOICED_CONFIDENCE;
     if (this.voiced) {
-      this.T0 = tau;
-      this.f0 = sampleRate / tau;
+      this.unvoicedHops = 0;
+      if (!reacquire) tau = this.octaveRescue(tau);
+      if (this.acceptPitch(tau, reacquire)) {
+        this.T0 = tau;
+        this.f0 = sampleRate / tau;
+      }
     }
+  }
+
+  /**
+   * Vocal fry or a rough onset makes alternate glottal pulses unequal, which
+   * doubles the true period, and YIN duly reports an octave low - for as long
+   * as the roughness sits in the 43 ms window, so a 30 ms glitch reads as an
+   * octave drop for ~50 ms. Every tracked harmony used to drop with it.
+   *
+   * The tell is that the old period still fits: measured, YIN's dip there stays
+   * below 0.26 through such a glitch, but sits above 1.27 when the voice really
+   * has gone down an octave. So a reading at twice the current period is sent
+   * back to the current period whenever that still fits.
+   */
+  octaveRescue(tau) {
+    if (Math.abs(12 * Math.log2(tau / (2 * this.T0))) > 1) return tau;
+    const cmnd = this.cmnd;
+    const r = Math.max(2, Math.round(this.T0 * 0.03));
+    const lo = Math.max(this.tauMin + 1, Math.round(this.T0) - r);
+    const hi = Math.min(this.tauMax - 1, Math.round(this.T0) + r);
+    let best = -1;
+    for (let k = lo; k <= hi; k++) if (best < 0 || cmnd[k] < cmnd[best]) best = k;
+    if (best < 0 || cmnd[best] >= OCTAVE_RESCUE) return tau;
+    const a = cmnd[best - 1], b = cmnd[best], c = cmnd[best + 1];
+    const denom = a - 2 * b + c;
+    return Math.abs(denom) > 1e-12 ? best + 0.5 * (a - c) / denom : best;
+  }
+
+  /**
+   * Any other leap of JUMP_SEMIS or more is held back until it repeats for
+   * JUMP_CONFIRM hops, so a one-off misreading passes unheard and a real leap
+   * is only ~21 ms late. After a pause a new phrase can start anywhere, so the
+   * first reading is trusted.
+   */
+  acceptPitch(tau, reacquire) {
+    const leap = Math.abs(12 * Math.log2(this.T0 / tau));
+    if (reacquire || leap < JUMP_SEMIS) {
+      this.pendingCount = 0;
+      return true;
+    }
+    if (this.pendingCount > 0 && Math.abs(12 * Math.log2(this.pendingTau / tau)) < 1) {
+      this.pendingCount++;
+    } else {
+      this.pendingTau = tau;
+      this.pendingCount = 1;
+    }
+    if (this.pendingCount < JUMP_CONFIRM) return false;
+    this.pendingCount = 0;
+    return true;
   }
 
   pushMark(m) {
@@ -321,12 +394,13 @@ class MessinaEngine extends AudioWorkletProcessor {
   /* ---------- synthesis ---------- */
 
   targetRatio(v) {
+    const detune = Math.pow(2, v.detune * this.detune / 1200);
     if (this.absolute && v.midi !== null) {
       const hz = 440 * Math.pow(2, (v.midi - 69) / 12);
-      if (this.f0 > 0) return Math.max(0.25, Math.min(4, hz / this.f0));
+      if (this.f0 > 0) return Math.max(0.25, Math.min(4, detune * hz / this.f0));
       return v.ratio;                            // no pitch yet: hold
     }
-    return Math.max(0.25, Math.min(4, Math.pow(2, v.semis / 12)));
+    return Math.max(0.25, Math.min(4, detune * Math.pow(2, v.semis / 12)));
   }
 
   readInterpolated(pos) {
@@ -433,6 +507,7 @@ class MessinaEngine extends AudioWorkletProcessor {
   process(inputs, outputs) {
     const out = outputs[0][0];
     if (!out) return true;
+    const outR = outputs[0][1];                 // absent when the host asks for mono
     const input = inputs[0][0];
     const n = out.length;
 
@@ -458,6 +533,7 @@ class MessinaEngine extends AudioWorkletProcessor {
 
     if (this.tmpA.length !== n) { this.tmpA = new Float32Array(n); this.tmpB = new Float32Array(n); }
     out.fill(0);
+    if (outR) outR.fill(0);
     for (const v of this.voices) {
       if (!v.active && v.gain < 1e-4) continue;
       v.ratioTarget = this.targetRatio(v);
@@ -473,13 +549,25 @@ class MessinaEngine extends AudioWorkletProcessor {
       } else {
         this.renderResampleInto(v, this.tmpB, frameStart, n);
       }
+      // Equal-power pan, scaled by sqrt(2) so the centre is unity in each ear:
+      // spread 0 is exactly the old mono, and panning never changes the power.
+      const theta = (v.pan * this.spread + 1) * Math.PI / 4;
+      const panL = Math.SQRT2 * Math.cos(theta), panR = Math.SQRT2 * Math.sin(theta);
       for (let i = 0; i < n; i++) {
         v.blend += (target - v.blend) * this.blendCoef;
         const s = v.blend > 0.999
           ? this.tmpA[i]
           : v.blend * this.tmpA[i] + (1 - v.blend) * this.tmpB[i];
         v.gain += (v.gainTarget - v.gain) * this.gainCoef;
-        out[i] += s * v.gain * this.duckBuf[i];
+        const y = s * v.gain * this.duckBuf[i];
+        if (outR) {
+          v.gainL += (panL - v.gainL) * this.gainCoef;     // glide, so moving spread doesn't zipper
+          v.gainR += (panR - v.gainR) * this.gainCoef;
+          out[i] += y * v.gainL;
+          outR[i] += y * v.gainR;
+        } else {
+          out[i] += y;
+        }
       }
     }
 

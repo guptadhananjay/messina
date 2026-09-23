@@ -3,7 +3,7 @@
  *
  * source -+-> inputGain -+-> dryDelay -> dryGain ---------+-> mixBus -+-> masterGain -> out
  *         |              |                                |           |
- *  mic or file           +-> engine (8 voices) ---------> harmonyGain +-> convolver -> wetGain -^
+ *  mic or file           +-> engine (8 voices, stereo) -> harmonyGain +-> convolver -> wetGain -^
  *
  * The source is either the live mic or a loaded audio file; everything
  * downstream is identical, so the keys and the chord chart work on both.
@@ -94,12 +94,15 @@ const sliders = {
   harmony: (v) => nodes.harmony.gain.setTargetAtTime(v, ctx.currentTime, 0.01),
   reverb: (v) => nodes.wet.gain.setTargetAtTime(v, ctx.currentTime, 0.01),
   master: (v) => nodes.master.gain.setTargetAtTime(muted ? 0 : v, ctx.currentTime, 0.01),
+  spread: () => sendConfig(),
+  detune: () => sendConfig(),
 };
+const sliderText = { detune: (v) => v.toFixed(0) + '\u00a2' };
 
 for (const name of Object.keys(sliders)) {
   const input = $(name);
   input.addEventListener('input', () => {
-    $(name + 'V').textContent = Number(input.value).toFixed(2);
+    $(name + 'V').textContent = (sliderText[name] ?? ((v) => v.toFixed(2)))(Number(input.value));
     if (ctx) sliders[name](Number(input.value));
   });
 }
@@ -147,7 +150,7 @@ async function buildGraph() {
     numberOfOutputs: 1,
     channelCount: 1,
     channelCountMode: 'explicit',
-    outputChannelCount: [1],
+    outputChannelCount: [2],                  // harmonies are panned across the stereo field
   });
   engine.port.onmessage = (e) => onEngineStatus(e.data);
   input.connect(engine).connect(harmony);
@@ -478,6 +481,8 @@ function sendConfig() {
     absolute: tracking,
     window: r.window,
     fmin: r.fmin,
+    spread: Number($('spread').value),
+    detune: Number($('detune').value),
   });
 }
 
