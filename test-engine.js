@@ -311,6 +311,38 @@ check(resampScale.scale > 1.7, 'resample drags formants (control)',
       'envelope moved x' + resampScale.scale.toFixed(2) +
       ' (want ~x2.00, match ' + resampScale.corr.toFixed(2) + ')');
 
+/* ---------- 3c. deep downward shifts must not leave gaps ---------- */
+
+print('-- deep downward shifts --');
+(function () {
+  // PSOLA grains stop overlapping below about an octave down, which left the
+  // output part silence - a garbled, chopped voice. Voices below the floor
+  // crossfade to the resampler, so nothing should drop out at any interval.
+  var sig = syntheticVoice(180, 1.2);
+  var from = Math.floor(SR * 0.7);
+
+  function silentFraction(out) {
+    var win = 64, silent = 0, total = 0, peak = 0;
+    for (var i = from; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+    for (var s = from; s + win < out.length; s += win) {
+      var m = 0;
+      for (var j = s; j < s + win; j++) m = Math.max(m, Math.abs(out[j]));
+      total++;
+      if (m < peak * 0.02) silent++;
+    }
+    return silent / total;
+  }
+
+  var worst = 0, detail = '';
+  [-7, -12, -17, -19, -24].forEach(function (semis) {
+    var f = silentFraction(runEngine(sig, { mode: 'psola', semis: semis }).out);
+    worst = Math.max(worst, f);
+    detail += semis + ':' + (f * 100).toFixed(0) + '% ';
+  });
+  check(worst < 0.02, 'no dropouts at deep downward shifts',
+        'worst ' + (worst * 100).toFixed(1) + '% silence  [' + detail.trim() + ']');
+})();
+
 /* ---------- 4b. changing chord mid-hold ---------- */
 
 print('-- chord change while held --');

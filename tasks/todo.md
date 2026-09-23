@@ -41,6 +41,9 @@
 - [x] `serve.py` with no-store, after stale cached modules wasted debugging time
 - [x] Fix harmonies thinning out at higher intervals (grain width, see below)
 - [x] Arrow keys change the sounding chord while space is held, wrapping at the ends
+- [x] Fix garbled voice at deep downward shifts (PSOLA floor, see below)
+- [x] Fix z/x octave keys being swallowed by octave folding
+- [x] Fix keys swallowed by a focused dropdown/checkbox/button; say "press Start first"; stale help text
 - [ ] Listening test with a real voice
 
 ## Phase 3 - candidates
@@ -90,6 +93,36 @@ and glides the ratio over ~11 ms. Retriggering also exposed a latent click: the 
 voice's grain state whenever it was inactive, which cut the tail off a voice still ramping down.
 It now only rebuilds a genuinely idle voice. `test-engine.js` asserts the change is gap-free
 (rms 0.327 before, 0.320 across the change), click-free, and lands on the new note.
+
+**Garbled voice at low notes (user-reported).** Two separate causes, found by measuring rather
+than guessing. First, PSOLA lowers pitch by spacing pulses further apart, but grains are only ~2
+pitch periods wide, so below about an octave down consecutive grains stop touching: measured 16.7%
+silence at -17 semitones, 25.6% at -19, 44.1% at -24, against 0% for the resampler. A wider grain
+would reintroduce the original pitch, so it is a real limit of the algorithm. Voices below the
+floor now crossfade (30 ms) to the resampler, which is gap-free, at the cost of formants moving
+with the pitch. Second, `z`/`x` were a no-op whenever octave folding was on, because folding
+reduced the note to a pitch class and discarded the octave - so pressing them appeared to do
+nothing, or with folding off produced exactly the deep shifts that garbled. Both fixed; a dropout
+test covers -7 to -24.
+
+Also measured: pitch tracking on polyphonic material is stable but wrong - a three-note chord
+tracked steadily to a subharmonic (90 Hz under 180/220/270), and a tritone pair to neither note.
+So a full mix will sound in tune with itself but in the wrong key; that is what the tracking switch
+is for. Worth surfacing in the UI later.
+
+CPU is now ~10% of the render budget for eight voices, up from ~4.8%, since the crossfade needs the
+resampler's delay line kept current. Voices sitting fully on PSOLA skip the second render and just
+advance that phase, verified by counting renders: 0/375 for an upward shift, 375/375 below the
+floor.
+
+**Focus bugs (review).** Only the chord textarea now counts as typing. Before this, a dropdown
+still focused after a change swallowed space, the arrows and the note keys, and pressing a/d/e/f/g
+used type-ahead to silently change the fallback note. When the app handles a key it now blurs the
+focused control first, so space can't press a focused Stop button or tick a checkbox. Verified in
+Chrome with real key presses: the dropdown keeps its value, the checkbox stays ticked, Start stays
+Start, and the chord sounds each time. Chrome on macOS doesn't give focus to a mouse-clicked button,
+so the Stop case only happened via Tab. Keys pressed before Start now say so, instead of lighting a
+silent key.
 
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`

@@ -28,6 +28,7 @@ const YIN_THRESHOLD = 0.12;
 const F_MAX = 1000;              // highest f0 we look for
 const VOICED_CONFIDENCE = 0.45;
 const UNVOICED_DUCK = 0.5;       // harmonies drop ~6 dB on consonants
+const PSOLA_FLOOR = 0.5;         // below an octave down, PSOLA grains stop overlapping
 
 /** Iterative radix-2 complex FFT with precomputed twiddles. */
 class FFT {
@@ -114,12 +115,15 @@ class MessinaEngine extends AudioWorkletProcessor {
       this.voices.push({
         id: null, active: false, midi: null, semis: 0,
         gain: 0, gainTarget: 0, ratio: 1, ratioTarget: 1,
-        nextOut: 0, delayPos: 0,
+        nextOut: 0, delayPos: 0, blend: 1,
         acc: new Float32Array(ACC), wsum: new Float32Array(ACC),
       });
     }
 
+    this.blendCoef = 1 - Math.exp(-1 / (0.030 * sampleRate));
     this.duckBuf = new Float32Array(128);
+    this.tmpA = new Float32Array(128);
+    this.tmpB = new Float32Array(128);
     this.configure(2048, 82);
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
@@ -170,6 +174,7 @@ class MessinaEngine extends AudioWorkletProcessor {
           voice.acc.fill(0);
           voice.wsum.fill(0);
           voice.ratio = this.targetRatio(voice);
+          voice.blend = this.psolaTarget(voice);
         }
         break;
       }
@@ -359,7 +364,18 @@ class MessinaEngine extends AudioWorkletProcessor {
     }
   }
 
-  renderPsola(v, out, frameStart, n) {
+  /**
+   * PSOLA works by spacing pitch pulses further apart to lower the pitch, but a
+   * grain is only about two analysis periods wide. Below roughly an octave down
+   * the synthesis spacing exceeds the grain width, so consecutive grains stop
+   * touching and the output is literally silence between pulses - 44% silence at
+   * two octaves down, heard as a garbled, chopped voice. The source has no
+   * content to fill that gap with (a wider grain would carry the original pitch
+   * back in), so this is a real limit of the algorithm, not a bug to tune away.
+   * Voices below PSOLA_FLOOR crossfade to the resampler instead, which is
+   * gap-free; the cost is that their formants move down with the pitch.
+   */
+  renderPsolaInto(v, buf, frameStart, n) {
     const T0 = this.T0;
     const T1 = Math.max(4, T0 / v.ratio);
     const horizon = frameStart + n + T0;
@@ -372,37 +388,46 @@ class MessinaEngine extends AudioWorkletProcessor {
     for (let i = 0; i < n; i++) {
       const idx = (frameStart + i) & ACC_MASK;
       const w = v.wsum[idx];
-      const s = w > 1e-4 ? v.acc[idx] / w : 0;
+      buf[i] = w > 1e-4 ? v.acc[idx] / w : 0;
       v.acc[idx] = 0;
       v.wsum[idx] = 0;
-      v.gain += (v.gainTarget - v.gain) * this.gainCoef;
-      out[i] += s * v.gain * this.duckBuf[i];
     }
   }
 
-  /** Phase 1's splice-crossfade resampler, kept for A/B against PSOLA. */
-  renderResample(v, out, frameStart, n) {
+  /** Phase 1's splice-crossfade resampler: A/B control, and the deep-shift path. */
+  renderResampleInto(v, buf, frameStart, n) {
     const G = this.grain;
     const step = 1 - v.ratio;
     const thr = Math.abs(step) * this.xfade;
     for (let i = 0; i < n; i++) {
       const base = frameStart + i - this.delay;
       const d = v.delayPos;
-      let s;
       if (thr > 0 && d < thr) {
         const u = (d / thr) * (Math.PI / 2);
-        s = Math.sin(u) * this.readInterpolated(base - d)
-          + Math.cos(u) * this.readInterpolated(base - d - G);
+        buf[i] = Math.sin(u) * this.readInterpolated(base - d)
+               + Math.cos(u) * this.readInterpolated(base - d - G);
       } else {
-        s = this.readInterpolated(base - d);
+        buf[i] = this.readInterpolated(base - d);
       }
       v.delayPos += step;
       if (v.delayPos >= G) v.delayPos -= G;
       else if (v.delayPos < 0) v.delayPos += G;
-
-      v.gain += (v.gainTarget - v.gain) * this.gainCoef;
-      out[i] += s * v.gain * this.duckBuf[i];
     }
+  }
+
+  advanceDelayPos(pos, step, n) {
+    const G = this.grain;
+    let p = (pos + step * n) % G;
+    if (p < 0) p += G;
+    return p;
+  }
+
+  /** Blend of the two engines for this voice, with hysteresis at the boundary. */
+  psolaTarget(v) {
+    if (this.mode !== 'psola') return 0;
+    if (v.ratio < PSOLA_FLOOR) return 0;
+    if (v.ratio > PSOLA_FLOOR * 1.1) return 1;
+    return v.blend;                              // inside the dead band: hold
   }
 
   process(inputs, outputs) {
@@ -431,13 +456,31 @@ class MessinaEngine extends AudioWorkletProcessor {
       this.duckBuf[i] = this.duck;
     }
 
+    if (this.tmpA.length !== n) { this.tmpA = new Float32Array(n); this.tmpB = new Float32Array(n); }
     out.fill(0);
     for (const v of this.voices) {
       if (!v.active && v.gain < 1e-4) continue;
       v.ratioTarget = this.targetRatio(v);
       v.ratio += (v.ratioTarget - v.ratio) * this.ratioCoef;
-      if (this.mode === 'psola') this.renderPsola(v, out, frameStart, n);
-      else this.renderResample(v, out, frameStart, n);
+
+      const target = this.psolaTarget(v);
+      this.renderPsolaInto(v, this.tmpA, frameStart, n);
+      if (v.blend > 0.999 && target > 0.999) {
+        // Fully on PSOLA: skip the resampler but keep its delay line advancing,
+        // so a later crossfade into it starts from the right phase rather than
+        // jumping. Its only state is that phase, so this is exact.
+        v.delayPos = this.advanceDelayPos(v.delayPos, 1 - v.ratio, n);
+      } else {
+        this.renderResampleInto(v, this.tmpB, frameStart, n);
+      }
+      for (let i = 0; i < n; i++) {
+        v.blend += (target - v.blend) * this.blendCoef;
+        const s = v.blend > 0.999
+          ? this.tmpA[i]
+          : v.blend * this.tmpA[i] + (1 - v.blend) * this.tmpB[i];
+        v.gain += (v.gainTarget - v.gain) * this.gainCoef;
+        out[i] += s * v.gain * this.duckBuf[i];
+      }
     }
 
     this.reportCounter += n;

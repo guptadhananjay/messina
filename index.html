@@ -216,14 +216,18 @@
     <div class="keys" id="keys"></div>
     <p class="sub" style="margin:14px 0 0">
       Hold keys to stack harmonies. <kbd>z</kbd> / <kbd>x</kbd> shift the whole row an octave
-      (<span id="octave">0</span>). Each key is an <em>interval</em>, so harmonies follow your melody.
+      (<span id="octave">0</span>). With <em>follow my pitch</em> on, each key is a fixed note that
+      harmonies land on wherever you sing; off, each key is an <em>interval</em> above your voice, so
+      harmonies move with your melody.
     </p>
   </div>
 
   <div class="panel">
     <div class="row" style="justify-content: space-between; margin-bottom: 12px">
       <strong>Chord chart</strong>
-      <label class="hint">I'm singing <select id="reference"></select></label>
+      <label class="hint" id="referenceLabel" title="Only used when no pitch is detected">
+        If no pitch is heard, assume I'm singing <select id="reference"></select>
+      </label>
     </div>
     <textarea id="chart" spellcheck="false" aria-label="Chord chart"></textarea>
     <div class="progression" id="progression"></div>
@@ -232,7 +236,8 @@
       <kbd>&larr;</kbd> <kbd>&rarr;</kbd> change chord &mdash; while space is held they move the
       sounding chord straight to the next one, wrapping round at the end, so you can play a whole
       progression without letting go. <kbd>delete</kbd> rewinds, or click any chord to cue it. Bar lines and line breaks are ignored, so paste straight from a tab.
-      Numbers under each chord are the semitone shifts it will use.
+      Under each chord are the notes it will sound &mdash; or, with <em>follow my pitch</em> off, the
+      semitone shifts it will use.
     </p>
   </div>
 

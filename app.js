@@ -513,6 +513,12 @@ function referenceMidi() {
   return 48 + reference;                      // C3 + the fallback pitch class
 }
 
+/** The fallback note only applies when nothing is being tracked. */
+function renderReferenceState() {
+  $('referenceLabel').style.opacity = tracking ? '0.45' : '1';
+  $('reference').disabled = tracking && detected.voiced;
+}
+
 function renderPitch() {
   const live = detectedMidi();
   if (live === null) {
@@ -526,6 +532,7 @@ function renderPitch() {
       + detected.f0.toFixed(1) + ' Hz';
   }
   $('confidence').style.width = Math.round(detected.confidence * 100) + '%';
+  renderReferenceState();
 }
 
 /* ---------- chord chart ---------- */
@@ -622,16 +629,28 @@ function keyNote(offset) {
   if (!tracking) return Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, offset));
   const ref = referenceMidi();
   if (fold) {
+    // Fold to the octave nearest the voice, then honour z/x on top - otherwise
+    // folding throws the octave away and those keys silently do nothing.
     const pc = ((offset % 12) + 12) % 12;
     let d = (((pc - ref) % 12) + 12) % 12;
     if (d > 6) d -= 12;
-    return ref + d;
+    return Math.max(24, Math.min(96, ref + d + octave * 12));
   }
-  return 48 + offset;
+  return Math.max(24, Math.min(96, 48 + offset));
 }
 
+/** Only the chart box takes typing; every other control yields the keys. */
 function typing(target) {
-  return target && (target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
+  return target && target.tagName === 'TEXTAREA';
+}
+
+const OWNED_KEYS = new Set([' ', 'p', 'arrowleft', 'arrowright', 'backspace', 'z', 'x']);
+
+/** Nothing sounds before Start - say so, rather than lighting a silent key. */
+function requireRunning() {
+  if (running) return true;
+  $('status').textContent = 'Not running - press Start first';
+  return false;
 }
 
 window.addEventListener('keydown', (e) => {
@@ -647,19 +666,23 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (typing(e.target)) return;                  // let the chart box take its own keys
+  if (!OWNED_KEYS.has(key) && !semitonesFor.has(key)) return;
+
+  // A clicked button, checkbox or dropdown keeps focus. Left there, space would
+  // press Stop or tick a box on key-up, and a dropdown would eat letters as
+  // type-ahead - silently changing the fallback note. Take the key back.
+  e.preventDefault();
+  if (e.target instanceof HTMLElement && e.target !== document.body) e.target.blur();
 
   if (key === ' ') {                             // hold to sound the queued chord
-    e.preventDefault();
-    if (!e.repeat && playingIndex === null) soundChord();
+    if (!e.repeat && playingIndex === null && requireRunning()) soundChord();
     return;
   }
   if (key === 'p') {                             // transport
-    e.preventDefault();
     if (!e.repeat) togglePlay();
     return;
   }
   if (key === 'arrowleft' || key === 'arrowright') {
-    e.preventDefault();
     if (e.repeat) return;
     const step = key === 'arrowleft' ? -1 : 1;
     // While space is held the arrows change the sounding chord, so you can move
@@ -669,7 +692,6 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (key === 'backspace') {                     // back to the top of the chart
-    e.preventDefault();
     releaseChordVoices();
     playingIndex = null;
     nextIndex = 0;
@@ -682,12 +704,9 @@ window.addEventListener('keydown', (e) => {
   if (key === 'z' || key === 'x') {
     octave = Math.max(-2, Math.min(2, octave + (key === 'z' ? -1 : 1)));
     $('octave').textContent = octave > 0 ? '+' + octave : String(octave);
-    e.preventDefault();
     return;
   }
-  if (!semitonesFor.has(key)) return;
-  e.preventDefault();
-  if (e.target.tagName === 'INPUT') e.target.blur();
+  if (!requireRunning()) return;
 
   voiceOn('key:' + key, keyNote(semitonesFor.get(key) + octave * 12));
   keyEls.get(key)?.classList.add('on');

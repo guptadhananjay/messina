@@ -49,9 +49,10 @@ chart before singing it.
 
 ## Playing it
 
-**Intervals, by hand.** The home rows are a piano keyboard: `a w s e d f t g y h
-u j k` spans an octave from unison to +12 semitones. Hold several at once to
-stack harmonies. `z` / `x` shift the whole row an octave.
+**Notes, by hand.** The home rows are a piano keyboard: `a w s e d f t g y h u j
+k` spans an octave. Hold several at once to stack harmonies. `z` / `x` shift the
+whole row an octave, which applies on top of octave folding rather than being
+swallowed by it.
 
 **Chords, from a chart.** Paste a progression into the chord box — bar lines,
 repeat marks and line breaks are all just separators, so you can copy straight
@@ -67,8 +68,8 @@ next one. **While space is held, `←` `→` move the sounding chord straight to
 next one**, wrapping round at the end, so a whole progression can be played
 without ever letting go — the voices are retargeted rather than retriggered, so
 the change is gap-free. With nothing held those arrows just move the cue.
-`delete` rewinds to the top, and clicking any chord cues it. The numbers under each chord are the semitone
-shifts it will use.
+`delete` rewinds to the top, and clicking any chord cues it. Under each chord are the notes it will
+sound, or the semitone shifts it will use when **Follow my pitch** is off.
 
 Recognized symbols cover what charts actually print: `Am`, `F#m7`, `Cmaj7`, `G7`,
 `Dsus4`, `Bb`, `C/G`, `Em7b5`, `A7#9`, `E5`, `Cadd9`, `G7sus4`, `Bdim7`, plus
@@ -148,6 +149,15 @@ harmonies thinning out as they go higher. Sizing grains to the synthesis period
 keeps neighbours at a clean 50% overlap and holds the level within ~1.2 dB
 across the range; `test-engine.js` asserts it.
 
+PSOLA has a floor. Lowering pitch means spacing pitch pulses further apart, but
+a grain is only about two pitch periods wide, so below roughly an octave down
+the pulses stop touching and the output is part silence - 44% silence at two
+octaves down, heard as a garbled, chopped voice. A wider grain would carry the
+original pitch back in, so this is a genuine limit of the algorithm rather than
+a parameter to tune. Voices below that floor crossfade to the resampler instead,
+which is gap-free; the trade is that their formants move down with the pitch.
+`test-engine.js` asserts no dropouts down to two octaves.
+
 The old algorithm is still in there as `resample` mode behind the formant
 toggle. It is a variable delay line: input written at 1×, read by a head drifting
 at `(1 - ratio)`, wrapping every 40 ms with a 6 ms splice crossfade against a head
@@ -161,8 +171,8 @@ each output's spectral envelope with the source's. PSOLA comes out at **×1.01**
 resampling at **×2.05**. The resample case is asserted to fail the formant test —
 if it ever passes, the test has stopped measuring what it claims to.
 
-Eight PSOLA voices cost about **4.8% of the audio render budget** (measured, 20×
-faster than real time), so the DSP is not where latency comes from.
+Eight voices cost about **10% of the audio render budget** (measured, 10× faster
+than real time), so the DSP is not where latency comes from.
 
 Reverb is a `ConvolverNode` fed a JS-generated impulse response (decaying noise),
 so there is no audio asset to download.
