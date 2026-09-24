@@ -86,6 +86,25 @@ one way and right voices the other, as a doubler would, which thickens the
 stack. Together they give the wide, shimmering stack Prismizer is known for; both
 at zero is the old centred, dead-in-tune sound. The dry voice stays centred.
 
+## Recording
+
+**Record** (next to Start, or `r`) captures what you're playing and saves it as a
+WAV file when you press it again. The file lands in your Downloads folder as
+`messina-<date>-<time>.wav`. Pressing **Stop** mid-take saves it too, so nothing
+is lost. It records the full stereo mix: dry voice, harmonies and reverb, with
+spread intact.
+
+The tap sits *before* the Master slider, so headphone volume and the `esc` mute
+change what you hear but not what gets recorded. It also comes out tighter than
+what you hear: the dry voice is already delayed to line up with the harmonies,
+and Bluetooth or output latency never reaches the file.
+
+The files are 24-bit PCM, which GarageBand, Logic, Audacity and any DAW open
+directly. The browser's built-in `MediaRecorder` was skipped because it only
+writes compressed WebM/Opus. A minute of recording is about 17 MB, and the take is
+held in memory until it's saved, so very long takes (tens of minutes) will use
+a lot of RAM.
+
 ## Your voice
 
 The tool tracks the pitch you are singing (YIN, ~sub-cent on steady notes) and
@@ -119,15 +138,16 @@ aligned rather than flamming.
 ```
 mic or file ─► inputGain ─┬─► dryGain ─────────────┐
                   │                                │
-                  └─► [8 × shifter → pan] ─(stereo)─► harmonyGain ─┬─► mixBus ─► master ─► out
-                                                                   └─► convolver ─► wetGain ─┘
+                  └─► [8 × shifter → pan] ─(stereo)─► harmonyGain ─┬─► mixBus ─► bus ─┬─► master ─► out
+                                                                   └─► convolver ─► wetGain ─┘   └─► recorder
 ```
 
 | File | Role |
 | --- | --- |
 | `engine.js` | the `AudioWorkletProcessor`: pitch tracking and all eight voices |
 | `chords.js` | chord-symbol parsing and voicing |
-| `app.js` | audio graph, input sources, transport, keyboard, chart control |
+| `app.js` | audio graph, input sources, transport, recording, keyboard, chart control |
+| `recorder.js` | the capture worklet and the WAV encoder |
 | `index.html` | markup and styles |
 | `test-engine.js` | offline DSP checks |
 | `serve.py` | no-cache dev server |
@@ -204,7 +224,8 @@ so there is no audio asset to download.
 Runs the real worklet under a small shim — no browser, no mic, no dependencies:
 YIN accuracy on sines and on synthetic voices (sub-cent), PSOLA pitch accuracy
 across intervals, the differential formant test above, stereo spread and detune,
-octave glitches ignored while real octave leaps are followed, and continuity
+octave glitches ignored while real octave leaps are followed, the WAV encoder
+(header fields, round-trip and clipping), and continuity
 checks for NaNs, sample-level discontinuities and level.
 
 ## Latency

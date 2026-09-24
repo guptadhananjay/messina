@@ -1,9 +1,13 @@
 /**
  * Messina - phase 1.
  *
- * source -+-> inputGain -+-> dryDelay -> dryGain ---------+-> mixBus -+-> masterGain -> out
- *         |              |                                |           |
- *  mic or file           +-> engine (8 voices, stereo) -> harmonyGain +-> convolver -> wetGain -^
+ * source -+-> inputGain -+-> dryDelay -> dryGain ---------+-> mixBus -+-> bus -+-> masterGain -> out
+ *         |              |                                |           |   ^    |
+ *  mic or file           +-> engine (8 voices, stereo) -> harmonyGain +-> convolver -> wetGain
+ *                                                                              +-> recorder
+ *
+ * The recorder taps the bus before the master fader, so headphone level and
+ * the esc mute change what you hear but not what gets recorded.
  *
  * The source is either the live mic or a loaded audio file; everything
  * downstream is identical, so the keys and the chord chart work on both.
@@ -13,6 +17,7 @@
  * harmonies flam against the dry signal.
  */
 import { parseProgression, chordVoices, chordNotes, noteName, NOTE_NAMES } from './chords.js';
+import { encodeWav } from './recorder.js';
 
 const VOICE_COUNT = 8;
 const RAMP = 0.015;          // key attack/release, seconds
@@ -38,6 +43,12 @@ let running = false;
 let meterRaf = null;
 let octave = 0;
 let muted = false;
+
+let recorder = null;         // capture worklet node
+let takeChunks = null;       // [{ left, right }] while recording, else null
+let takeStartedAt = 0;       // ctx.currentTime when recording began
+let takeFlushed = null;      // resolver: the worklet has sent its last chunk
+let takeSaving = false;      // stop requested, waiting on that last chunk
 
 let sourceMode = 'mic';
 let micStream = null;
@@ -124,6 +135,7 @@ function impulseResponse(context, seconds = 2.2, decay = 2.6) {
 async function buildGraph() {
   ctx = new AudioContext({ latencyHint: 'interactive' });
   await ctx.audioWorklet.addModule('engine.js');
+  await ctx.audioWorklet.addModule('recorder.js');
   await ctx.resume();
 
   const input = ctx.createGain();
@@ -133,6 +145,7 @@ async function buildGraph() {
   const mix = ctx.createGain();
   const convolver = ctx.createConvolver();
   const wet = ctx.createGain();
+  const bus = ctx.createGain();
   const master = ctx.createGain();
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 1024;
@@ -141,9 +154,18 @@ async function buildGraph() {
   input.connect(analyser);
   input.connect(dryDelay).connect(dry).connect(mix);
   harmony.connect(mix);
-  mix.connect(master);
-  mix.connect(convolver).connect(wet).connect(master);
-  master.connect(ctx.destination);
+  mix.connect(bus);
+  mix.connect(convolver).connect(wet).connect(bus);
+  bus.connect(master).connect(ctx.destination);
+
+  recorder = new AudioWorkletNode(ctx, 'messina-recorder', {
+    numberOfInputs: 1,
+    numberOfOutputs: 0,
+    channelCount: 2,
+    channelCountMode: 'explicit',
+  });
+  recorder.port.onmessage = (e) => onRecorderMessage(e.data);
+  bus.connect(recorder);
 
   engine = new AudioWorkletNode(ctx, 'messina-engine', {
     numberOfInputs: 1,
@@ -155,7 +177,7 @@ async function buildGraph() {
   engine.port.onmessage = (e) => onEngineStatus(e.data);
   input.connect(engine).connect(harmony);
 
-  nodes = { input, dryDelay, dry, harmony, mix, wet, master, analyser };
+  nodes = { input, dryDelay, dry, harmony, mix, wet, bus, master, analyser };
   sendConfig();
   for (const name of Object.keys(sliders)) sliders[name](Number($(name).value));
 
@@ -196,6 +218,7 @@ async function start() {
     if (sourceMode === 'mic') await connectMic();
 
     running = true;
+    $('record').disabled = false;
     $('start').textContent = 'Stop';
     $('start').classList.add('running');
     $('status').textContent = sourceMode === 'mic'
@@ -214,6 +237,9 @@ async function start() {
 async function stop() {
   $('start').disabled = true;
 
+  const savedTake = await stopRecording();      // save the take before the context goes
+  $('record').disabled = true;
+  recorder = null;
   stopFile();
   cancelAnimationFrame(meterRaf);
   meterRaf = null;
@@ -239,7 +265,7 @@ async function stop() {
   $('latency').textContent = '—';
   updateVoiceCount();
   updateTransport();
-  $('status').textContent = 'Stopped';
+  $('status').textContent = savedTake ? `Stopped - saved ${savedTake}` : 'Stopped';
   $('start').textContent = 'Start';
   $('start').classList.remove('running');
   $('start').disabled = false;
@@ -253,6 +279,7 @@ function meterLoop(analyser) {
     for (const s of data) sum += s * s;
     $('meter').style.width = Math.min(100, Math.sqrt(sum / data.length) * 320).toFixed(1) + '%';
     if (filePlaying) renderPlayhead();
+    if (takeChunks) $('recTime').textContent = formatTime(ctx.currentTime - takeStartedAt);
     meterRaf = requestAnimationFrame(tick);
   };
   tick();
@@ -424,6 +451,68 @@ panel.addEventListener('drop', (e) => {
   panel.classList.remove('dragging');
   loadFile(e.dataTransfer.files[0]);
 });
+
+/* ---------- recording ---------- */
+
+function startRecording() {
+  if (!recorder || takeChunks) return;
+  takeChunks = [];
+  takeStartedAt = ctx.currentTime;
+  recorder.port.postMessage('start');
+  $('record').textContent = 'Stop recording';
+  $('record').classList.add('recording');
+  $('recTime').textContent = '0:00';
+}
+
+/** Ask the worklet for its last partial chunk, then write the take out. */
+async function stopRecording() {
+  if (!takeChunks || takeSaving) return;       // a second press mid-save would save it twice
+  takeSaving = true;
+  const done = new Promise((resolve) => { takeFlushed = resolve; });
+  recorder.port.postMessage('stop');
+  await Promise.race([done, new Promise((r) => setTimeout(r, 500))]);   // never hang Stop
+  const name = saveTake(takeChunks, ctx.sampleRate);
+  takeChunks = null;
+  takeSaving = false;
+  $('record').textContent = 'Record';
+  $('record').classList.remove('recording');
+  $('recTime').textContent = '';
+  return name;
+}
+
+function onRecorderMessage(msg) {
+  if (msg.done) { takeFlushed?.(); takeFlushed = null; return; }
+  takeChunks?.push(msg);
+}
+
+function saveTake(chunks, sampleRate) {
+  const frames = chunks.reduce((n, c) => n + c.left.length, 0);
+  if (!frames) return null;
+  const left = new Float32Array(frames), right = new Float32Array(frames);
+  let at = 0;
+  for (const c of chunks) { left.set(c.left, at); right.set(c.right, at); at += c.left.length; }
+
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const name = `messina-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    + `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.wav`;
+  const url = URL.createObjectURL(new Blob([encodeWav([left, right], sampleRate)], { type: 'audio/wav' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  $('status').textContent = `Saved ${name} (${formatTime(frames / sampleRate)})`;
+  return name;
+}
+
+function toggleRecording() {
+  if (!running) { requireRunning(); return; }
+  if (takeChunks) stopRecording();
+  else startRecording();
+}
+
+$('record').addEventListener('click', toggleRecording);
 
 /* ---------- voices ---------- */
 
@@ -649,7 +738,7 @@ function typing(target) {
   return target && target.tagName === 'TEXTAREA';
 }
 
-const OWNED_KEYS = new Set([' ', 'p', 'arrowleft', 'arrowright', 'backspace', 'z', 'x']);
+const OWNED_KEYS = new Set([' ', 'p', 'r', 'arrowleft', 'arrowright', 'backspace', 'z', 'x']);
 
 /** Nothing sounds before Start - say so, rather than lighting a silent key. */
 function requireRunning() {
@@ -681,6 +770,10 @@ window.addEventListener('keydown', (e) => {
 
   if (key === ' ') {                             // hold to sound the queued chord
     if (!e.repeat && playingIndex === null && requireRunning()) soundChord();
+    return;
+  }
+  if (key === 'r') {                             // record the mix
+    if (!e.repeat) toggleRecording();
     return;
   }
   if (key === 'p') {                             // transport

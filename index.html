@@ -54,6 +54,8 @@
     padding: 6px 14px; font-size: 13px;
   }
   button.small:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button.small.recording, button.small.recording:hover { background: #c4564b; border-color: #c4564b; color: #f6e9e7; }
+  .rec-time { color: #e07a6f; font-variant-numeric: tabular-nums; }
   .filebtn {
     display: inline-block; cursor: pointer;
     background: #1d222a; border: 1px solid var(--line); border-radius: 6px;
@@ -152,6 +154,8 @@
   <div class="panel">
     <div class="row">
       <button id="start">Start</button>
+      <button class="small" id="record" disabled title="Record the mix to a WAV file (r)">Record</button>
+      <span class="rec-time" id="recTime"></span>
       <span class="status" id="status">Not running</span>
     </div>
     <div class="meter"><i id="meter"></i></div>

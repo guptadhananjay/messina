@@ -51,6 +51,7 @@
 - [ ] Chord latch / freeze (hold a chord hands-free)
 - [x] Per-voice detune + stereo spread
 - [x] Pitch tracking holds through octave glitches (vocal fry) but follows real leaps
+- [x] Record the output to a 24-bit stereo WAV (`r`)
 - [ ] MIDI / MusicXML import to fill the chord chart
 - [ ] Real MIDI input via Web MIDI
 
@@ -141,6 +142,17 @@ because the 43 ms analysis window stretches a 30 ms glitch to ~50 ms of octave-l
 YIN's dip at the old period separated the cases cleanly (glitch <= 0.26, real low note >= 1.27), so
 octave-low readings snap back when the old period still fits (threshold 0.5). Now 0.0 semitones of
 excursion. Real octave leaps are followed in 52 ms (up; 36 ms before this change) and 36 ms (down).
+
+**Recording.** `recorder.js` is loaded both ways: as a worklet through addModule, where it registers
+the capture processor, and as an ES module by app.js for encodeWav. A `typeof registerProcessor` guard
+lets one file do both. The worklet has zero outputs, so Chrome pulls it without it being wired to the
+destination. It taps a new `bus` before the master fader. Verified in Chrome end to end. A 3 s take
+recorded while a file played and a chord was held came out as a valid RIFF/WAVE: 24-bit, 2 channels,
+48 kHz, 3.00 s. Chrome's own decodeAudioData read it back. L/R correlation was 0.994 before the chord
+(reverb only) and 0.781 during it (spread), at the pre-master level. Stop mid-take also saves.
+Downloads were intercepted in-page, so nothing was actually written to disk. One bug was caught in
+review before it ran: a Promise executor assigning `.resolve` onto the variable being assigned, which
+is still the old value inside the executor.
 
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`

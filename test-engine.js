@@ -521,5 +521,48 @@ print('-- continuity --');
   check(peak > 0.1 && peak < 1.5, 'output level sane', 'peak ' + peak.toFixed(3));
 })();
 
+/* ---------- 6. recording: WAV encoding ---------- */
+
+print('-- wav encoding --');
+(function () {
+  // recorder.js is an ES module; strip `export` so it loads under this shim.
+  // Its worklet half is skipped here: that needs AudioWorkletProcessor as a
+  // real base class, and it registers under a different name anyway.
+  var saved = globalThis.registerProcessor;
+  globalThis.registerProcessor = undefined;
+  var encodeWav = (new Function(
+    readFile('./recorder.js').replace(/^export /gm, '') + '; return encodeWav;'))();
+  globalThis.registerProcessor = saved;
+
+  var left = new Float32Array([0, 0.5, -0.5, 1, -1, 1.7, -3, 0.25]);
+  var right = new Float32Array([0.1, -0.1, 0, 0, 0.999, 0, 0, -0.25]);
+  var wav = encodeWav([left, right], 48000);
+  var v = new DataView(wav);
+  function str(at, n) { var t = ''; for (var i = 0; i < n; i++) t += String.fromCharCode(v.getUint8(at + i)); return t; }
+
+  var headerOk = str(0, 4) === 'RIFF' && str(8, 4) === 'WAVE' && str(12, 4) === 'fmt '
+    && str(36, 4) === 'data' && v.getUint16(20, true) === 1 && v.getUint16(22, true) === 2
+    && v.getUint32(24, true) === 48000 && v.getUint16(34, true) === 24
+    && v.getUint16(32, true) === 6 && v.getUint32(28, true) === 48000 * 6
+    && v.getUint32(40, true) === 8 * 6 && v.getUint32(4, true) === wav.byteLength - 8;
+  check(headerOk, 'wav header is 24-bit stereo PCM',
+        wav.byteLength + ' bytes, ' + v.getUint16(22, true) + ' ch, ' + v.getUint16(34, true) + '-bit, '
+        + v.getUint32(24, true) + ' Hz');
+
+  function sample(frame, ch) {
+    var at = 44 + frame * 6 + ch * 3;
+    var x = v.getUint8(at) | (v.getUint8(at + 1) << 8) | (v.getUint8(at + 2) << 16);
+    if (x & 0x800000) x -= 0x1000000;
+    return x / 8388607;
+  }
+  var worst = 0;
+  for (var i = 0; i < left.length; i++) {
+    var wantL = Math.max(-1, Math.min(1, left[i])), wantR = Math.max(-1, Math.min(1, right[i]));
+    worst = Math.max(worst, Math.abs(sample(i, 0) - wantL), Math.abs(sample(i, 1) - wantR));
+  }
+  check(worst < 1 / 8388607, 'wav samples round-trip, interleaved and clipped',
+        'worst error ' + worst.toExponential(1) + ' (1 LSB = ' + (1 / 8388607).toExponential(1) + ')');
+})();
+
 print('');
 print(failures ? failures + ' FAILED' : 'all passed');
