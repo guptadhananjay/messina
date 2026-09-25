@@ -246,6 +246,9 @@ async function stop() {
 
   for (const id of [...held.keys()]) voiceOff(id);
   for (const el of keyEls.values()) el.classList.remove('on');
+  midiDown.clear();
+  midiSustained.clear();
+  renderMidi();
   playingIndex = null;
   renderChart();
 
@@ -521,11 +524,11 @@ $('record').addEventListener('click', toggleRecording);
  * a semitone offset when it is not. The engine owns voice allocation now; the
  * app only tracks which ids are sounding so the UI can count them.
  */
-function voiceOn(id, note) {
+function voiceOn(id, note, gain = 1) {
   if (!ctx || held.has(id)) return;
   engine.port.postMessage(tracking
-    ? { type: 'noteOn', id, midi: note }
-    : { type: 'noteOn', id, semis: note });
+    ? { type: 'noteOn', id, midi: note, gain }
+    : { type: 'noteOn', id, semis: note, gain });
   held.set(id, note);
   updateVoiceCount();
 }
@@ -716,21 +719,136 @@ loadChart();
 updateTransport();
 renderPlayhead();
 
+/* ---------- MIDI keyboard ---------- */
+
+/**
+ * A MIDI keyboard is a third controller alongside the laptop keys and the
+ * chart, not a mode: held notes become voices exactly as laptop keys do, and
+ * all three can sound at once. Every device and channel is listened to.
+ *
+ * Octaves follow the Fold switch, as the laptop keys do. Fold off plays exactly
+ * the notes pressed, which is what the real Messina does and usually what a
+ * pianist wants. Fold on moves each to the octave nearest the voice. With
+ * Follow my pitch off, middle C is your own pitch and the rest are intervals.
+ */
+const MIDI_UNISON = 60;
+let midiAccess = null;
+const midiDown = new Map();      // note number -> velocity, keys physically held
+const midiSustained = new Set(); // released while the pedal was down
+let midiPedal = false;
+
+function midiTarget(note) {
+  if (!tracking) return Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, note - MIDI_UNISON));
+  return clampNote(fold ? nearestToVoice(note) : note);
+}
+
+/** Velocity -> voice gain. Soft notes stay audible rather than vanishing. */
+function velocityGain(velocity) {
+  return 0.3 + 0.7 * (velocity / 127);
+}
+
+function onMidiMessage(e) {
+  const [status, a, b] = e.data;
+  const kind = status & 0xf0;
+  if (kind === 0x90 && b > 0) midiNoteOn(a, b);
+  else if (kind === 0x80 || kind === 0x90) midiNoteOff(a);  // note-on at velocity 0 is note-off
+  else if (kind === 0xb0 && a === 64) midiSustain(b >= 64);
+  else if (kind === 0xb0 && (a === 120 || a === 123)) midiAllOff();
+  else return;
+  renderMidi();
+}
+
+function midiNoteOn(note, velocity) {
+  midiDown.set(note, velocity);
+  midiSustained.delete(note);
+  if (!running) { requireRunning(); return; }
+  const id = 'midi:' + note;
+  if (held.has(id)) voiceOff(id);                // restruck under the pedal: sound it afresh
+  voiceOn(id, midiTarget(note), velocityGain(velocity));
+}
+
+function midiNoteOff(note) {
+  midiDown.delete(note);
+  if (midiPedal) { midiSustained.add(note); return; }
+  voiceOff('midi:' + note);
+}
+
+function midiSustain(down) {
+  midiPedal = down;
+  if (down) return;
+  for (const note of midiSustained) if (!midiDown.has(note)) voiceOff('midi:' + note);
+  midiSustained.clear();
+}
+
+function midiAllOff() {
+  midiDown.clear();
+  midiSustained.clear();
+  midiPedal = false;
+  for (const id of [...held.keys()]) if (id.startsWith('midi:')) voiceOff(id);
+}
+
+function renderMidi() {
+  if (!midiAccess) return;
+  const names = [...midiAccess.inputs.values()].map((input) => input.name);
+  if (!names.length) {
+    $('midiStatus').textContent = 'MIDI connected - plug in a keyboard';
+    return;
+  }
+  const notes = [...new Set([...midiDown.keys(), ...midiSustained])].sort((x, y) => x - y);
+  $('midiStatus').textContent = names.join(', ')
+    + (notes.length ? ' \u00b7 ' + notes.map(noteName).join(' ') : '')
+    + (midiPedal ? ' \u00b7 pedal' : '');
+}
+
+function listenToInputs() {
+  for (const input of midiAccess.inputs.values()) input.onmidimessage = onMidiMessage;
+  renderMidi();
+}
+
+async function connectMidi() {
+  if (!navigator.requestMIDIAccess) {
+    $('midiStatus').textContent = 'This browser has no Web MIDI - use Chrome';
+    return;
+  }
+  try {
+    midiAccess = await navigator.requestMIDIAccess();
+  } catch (err) {
+    console.error(err);
+    $('midiStatus').textContent = 'MIDI permission was refused';
+    return;
+  }
+  $('midiConnect').hidden = true;
+  midiAccess.onstatechange = listenToInputs;     // keyboards plugged in or out while running
+  listenToInputs();
+}
+
+$('midiConnect').addEventListener('click', connectMidi);
+// Once Chrome has granted MIDI, reconnect on load without asking again.
+navigator.permissions?.query({ name: 'midi' })
+  .then((p) => { if (p.state === 'granted') connectMidi(); })
+  .catch(() => {});
+
 /* ---------- keyboard ---------- */
 
 /** A key press is an absolute note while tracking, an interval otherwise. */
 function keyNote(offset) {
   if (!tracking) return Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, offset));
+  // Folded, then z/x on top - otherwise folding throws the octave away and
+  // those keys silently do nothing.
+  if (fold) return clampNote(nearestToVoice(offset) + octave * 12);
+  return clampNote(48 + offset);
+}
+
+/** The note with this pitch class in the octave nearest your voice. */
+function nearestToVoice(note) {
   const ref = referenceMidi();
-  if (fold) {
-    // Fold to the octave nearest the voice, then honour z/x on top - otherwise
-    // folding throws the octave away and those keys silently do nothing.
-    const pc = ((offset % 12) + 12) % 12;
-    let d = (((pc - ref) % 12) + 12) % 12;
-    if (d > 6) d -= 12;
-    return Math.max(24, Math.min(96, ref + d + octave * 12));
-  }
-  return Math.max(24, Math.min(96, 48 + offset));
+  let d = ((((note % 12) - ref) % 12) + 12) % 12;
+  if (d > 6) d -= 12;
+  return ref + d;
+}
+
+function clampNote(n) {
+  return Math.max(24, Math.min(96, n));
 }
 
 /** Only the chart box takes typing; every other control yields the keys. */

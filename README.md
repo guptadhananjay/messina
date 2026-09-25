@@ -54,6 +54,22 @@ k` spans an octave. Hold several at once to stack harmonies. `z` / `x` shift the
 whole row an octave, which applies on top of octave folding rather than being
 swallowed by it.
 
+**Notes, from a MIDI keyboard.** Click **Connect MIDI** in the keyboard panel.
+Any MIDI keyboard or digital piano works, over USB or through a MIDI interface.
+Held notes become harmony voices exactly as laptop keys do. **Velocity** sets
+each voice's level: soft notes sit at 30%, so they stay audible. The **sustain
+pedal** holds notes after you let go. The keyboard is a third controller, not a
+separate mode, so the piano, the laptop keys and the chart can all sound at once.
+Every device and channel is heard, and keyboards can be plugged in while it
+runs. After the first time, Chrome remembers the permission and reconnects on
+load.
+
+Octaves follow **Fold octaves**, as the laptop keys do. Turn it off to hear
+exactly the notes you press, which is how the real Messina plays and usually what
+you want from a piano. Leave it on to have each note moved next to your voice.
+With **Follow my pitch** off, middle C is your own pitch and every other key is
+an interval from it.
+
 **Chords, from a chart.** Paste a progression into the chord box — bar lines,
 repeat marks and line breaks are all just separators, so you can copy straight
 off a tab site:
@@ -225,7 +241,7 @@ Runs the real worklet under a small shim — no browser, no mic, no dependencies
 YIN accuracy on sines and on synthetic voices (sub-cent), PSOLA pitch accuracy
 across intervals, the differential formant test above, stereo spread and detune,
 octave glitches ignored while real octave leaps are followed, the WAV encoder
-(header fields, round-trip and clipping), and continuity
+(header fields, round-trip and clipping), per-note gain for velocity, and continuity
 checks for NaNs, sample-level discontinuities and level.
 
 ## Latency
@@ -248,4 +264,3 @@ flam against, so a constant delay is imperceptible.
   forwards in time, no added delay — a file can be analysed ahead of playback)
 - Chord latch / freeze, so a chord holds hands-free
 - MIDI / MusicXML import to fill the chord chart
-- Real MIDI input via Web MIDI

@@ -184,7 +184,7 @@ class MessinaEngine extends AudioWorkletProcessor {
         voice.active = true;
         voice.midi = msg.midi ?? null;
         voice.semis = msg.semis ?? 0;
-        voice.gainTarget = 1;
+        voice.gainTarget = typeof msg.gain === 'number' ? Math.max(0, Math.min(1, msg.gain)) : 1;
         if (fresh) {
           voice.nextOut = this.write;
           voice.delayPos = 0;

@@ -53,7 +53,7 @@
 - [x] Pitch tracking holds through octave glitches (vocal fry) but follows real leaps
 - [x] Record the output to a 24-bit stereo WAV (`r`)
 - [ ] MIDI / MusicXML import to fill the chord chart
-- [ ] Real MIDI input via Web MIDI
+- [x] Real MIDI input via Web MIDI
 
 ## Phase 2 review
 
@@ -153,6 +153,17 @@ recorded while a file played and a chord was held came out as a valid RIFF/WAVE:
 Downloads were intercepted in-page, so nothing was actually written to disk. One bug was caught in
 review before it ran: a Promise executor assigning `.resolve` onto the variable being assigned, which
 is still the old value inside the executor.
+
+**Web MIDI.** A controller alongside the laptop keys and the chart, not a mode. Octaves follow
+the Fold switch, as the laptop keys do: fold off plays the exact note. Velocity maps to a per-note engine
+gain of 0.3 + 0.7 * v/127 (engine test: gain 0.5 gives x0.500, capped at 1). The sustain pedal defers
+note-offs, and a key still physically held survives the pedal lifting. Verified in Chrome with a fake
+MIDIAccess swapped in before Connect, logging every message the app sent to the engine. Checked:
+fold on/off targets, velocity, velocity-0 note-off, other channels, the pedal cases, tracking-off
+intervals, CC123 all-off, a second keyboard hot-plugged via onstatechange, and MIDI, chart and laptop
+key sounding together (5 voices) then releasing to 0. Not verified with a physical keyboard.
+Browser-automation gotcha, seen every session: the first click after scripting the page only focuses
+the window, so click again before concluding a button is broken.
 
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`

@@ -502,6 +502,33 @@ print('-- octave glitches --');
   });
 })();
 
+/* ---------- 4e. per-note gain (MIDI velocity) ---------- */
+
+print('-- per-note gain --');
+(function () {
+  var sig = syntheticVoice(150, 1.0);
+  function rmsWith(gain) {
+    var p = new Processor();
+    p.onMessage({ type: 'config', mode: 'psola', absolute: false, window: 2048, fmin: 82 });
+    var on = { type: 'noteOn', id: 'midi:64', semis: 4 };
+    if (gain !== undefined) on.gain = gain;
+    p.onMessage(on);
+    var s = 0, n = 0, block = 128;
+    for (var i = 0; i + block <= sig.length; i += block) {
+      var a = new Float32Array(block), o = new Float32Array(block);
+      a.set(sig.subarray(i, i + block));
+      p.process([[a]], [[o]], {});
+      if (i > SR * 0.4) for (var j = 0; j < block; j++) { s += o[j] * o[j]; n++; }
+    }
+    return Math.sqrt(s / n);
+  }
+  var full = rmsWith(undefined), half = rmsWith(0.5), over = rmsWith(3);
+  check(Math.abs(half / full - 0.5) < 0.01, 'note gain scales the voice',
+        'gain 0.5 gives x' + (half / full).toFixed(3) + ' of full level');
+  check(Math.abs(over / full - 1) < 1e-6, 'note gain is capped at 1',
+        'gain 3 gives x' + (over / full).toFixed(3));
+})();
+
 /* ---------- 5. continuity ---------- */
 
 print('-- continuity --');

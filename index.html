@@ -218,11 +218,20 @@
 
   <div class="panel">
     <div class="keys" id="keys"></div>
+    <div class="row" style="margin-top: 12px">
+      <button class="small" id="midiConnect">Connect MIDI</button>
+      <span class="hint" id="midiStatus">Play from a MIDI keyboard or digital piano too</span>
+    </div>
     <p class="sub" style="margin:14px 0 0">
       Hold keys to stack harmonies. <kbd>z</kbd> / <kbd>x</kbd> shift the whole row an octave
       (<span id="octave">0</span>). With <em>follow my pitch</em> on, each key is a fixed note that
       harmonies land on wherever you sing; off, each key is an <em>interval</em> above your voice, so
       harmonies move with your melody.
+    </p>
+    <p class="sub" style="margin:8px 0 0">
+      A MIDI keyboard works alongside all of this: held notes become harmony voices, velocity sets
+      their level and the sustain pedal holds them. Octaves follow <em>fold octaves</em> &mdash; turn
+      it off to hear exactly the notes you press.
     </p>
   </div>
 
