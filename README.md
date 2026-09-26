@@ -95,8 +95,16 @@ than silently dropped.
 Other controls: `p` plays/pauses a loaded file, `esc` mutes, and the sliders set
 dry / harmony / spread / detune / reverb / master.
 
-**Spread** pans the harmony voices apart, from centred (0) to hard left and right
-(1); the first two voices take the outside edges, so even a triad is wide.
+The four level sliders (Dry, Harmony, Reverb, Master) are in decibels, as on a
+mixing desk: 0 dB leaves a signal unchanged, −6 dB is about half the amplitude,
+and the bottom of the travel is off. Dry, Harmony and Reverb go up to +6 dB of
+boost. Master stops at 0 dB, because it is what reaches your ears. Equal steps in
+dB sound like equal changes, which a plain gain multiplier did not: it squeezed
+most of the audible range into the bottom third of the slider. Spread is a
+percentage and Detune is in cents. Double-click any slider to reset it.
+
+**Spread** pans the harmony voices apart, from centred (0%) to hard left and
+right (100%); the first two voices take the outside edges, so even a triad is wide.
 **Detune** nudges each voice sharp or flat by up to that many cents, left voices
 one way and right voices the other, as a doubler would, which thickens the
 stack. Together they give the wide, shimmering stack Prismizer is known for; both

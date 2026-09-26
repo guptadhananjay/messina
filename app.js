@@ -100,21 +100,46 @@ $('reference').addEventListener('change', () => {
   if (playingIndex !== null) soundChord(playingIndex);
 });
 
+/**
+ * Level sliders are in decibels, as on a mixing desk: 0 dB leaves a signal
+ * unchanged, and the bottom of the travel is off. Hearing works on ratios, so
+ * equal steps in dB sound like equal steps, where a plain gain multiplier
+ * crammed most of the audible range into the bottom third of the slider.
+ */
+const LEVEL_OFF = -48;
+const dbToGain = (db) => (db <= LEVEL_OFF ? 0 : Math.pow(10, db / 20));
+const setLevel = (param, db) => param.setTargetAtTime(dbToGain(db), ctx.currentTime, 0.01);
+
 const sliders = {
-  dry: (v) => nodes.dry.gain.setTargetAtTime(v, ctx.currentTime, 0.01),
-  harmony: (v) => nodes.harmony.gain.setTargetAtTime(v, ctx.currentTime, 0.01),
-  reverb: (v) => nodes.wet.gain.setTargetAtTime(v, ctx.currentTime, 0.01),
-  master: (v) => nodes.master.gain.setTargetAtTime(muted ? 0 : v, ctx.currentTime, 0.01),
+  dry: (v) => setLevel(nodes.dry.gain, v),
+  harmony: (v) => setLevel(nodes.harmony.gain, v),
+  reverb: (v) => setLevel(nodes.wet.gain, v),
+  master: (v) => setLevel(nodes.master.gain, muted ? LEVEL_OFF : v),
   spread: () => sendConfig(),
   detune: () => sendConfig(),
 };
-const sliderText = { detune: (v) => v.toFixed(0) + '\u00a2' };
+
+const formatDb = (db) => (db <= LEVEL_OFF ? 'off'
+  : (db > 0 ? '+' : db < 0 ? '\u2212' : '') + Math.abs(db).toFixed(1) + ' dB');
+const sliderText = {
+  spread: (v) => v.toFixed(0) + '%',
+  detune: (v) => v.toFixed(0) + '\u00a2',
+};
+const renderSlider = (name) => {
+  $(name + 'V').textContent = (sliderText[name] ?? formatDb)(Number($(name).value));
+};
 
 for (const name of Object.keys(sliders)) {
   const input = $(name);
+  renderSlider(name);
   input.addEventListener('input', () => {
-    $(name + 'V').textContent = (sliderText[name] ?? ((v) => v.toFixed(2)))(Number(input.value));
+    renderSlider(name);
     if (ctx) sliders[name](Number(input.value));
+  });
+  // Double-click puts a slider back where the page started it.
+  input.addEventListener('dblclick', () => {
+    input.value = input.defaultValue;
+    input.dispatchEvent(new Event('input'));
   });
 }
 
@@ -573,7 +598,7 @@ function sendConfig() {
     absolute: tracking,
     window: r.window,
     fmin: r.fmin,
-    spread: Number($('spread').value),
+    spread: Number($('spread').value) / 100,
     detune: Number($('detune').value),
   });
 }

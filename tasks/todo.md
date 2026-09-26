@@ -165,6 +165,13 @@ key sounding together (5 voices) then releasing to 0. Not verified with a physic
 Browser-automation gotcha, seen every session: the first click after scripting the page only focuses
 the window, so click again before concluding a button is broken.
 
+**Slider units.** Levels are now in dB (-48 = off, up to +6; Master capped at 0 dB), Spread in %,
+and Detune in cents. Double-click resets a slider to its default. The defaults were converted to keep
+the sound unchanged: dry 1.0 -> 0 dB, harmony 0.8 -> -1.9 dB (x0.8035, 0.03 dB off), reverb 0.25 ->
+-12 dB, master 0.35 -> -9.1 dB. Verified in Chrome by logging the AudioParam targets: startup gains
+1 / 0.8035 / 0.2512 / 0.3508; esc mute -> 0 and unmute -> 0.3508; the bottom of travel reads "off" and
+is 0; +6 dB -> 1.9953; spread 100% -> engine 1.0; a real double-click resets Master to -9.1 dB.
+
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`
 sending `no-store`.
