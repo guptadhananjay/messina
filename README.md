@@ -92,23 +92,30 @@ Recognized symbols cover what charts actually print: `Am`, `F#m7`, `Cmaj7`, `G7`
 shorthand like `C-7`, `CM7`, `CΔ`. Anything unparseable is outlined in red rather
 than silently dropped.
 
-Other controls: `p` plays/pauses a loaded file, `esc` mutes, and the sliders set
+Other controls: `p` plays/pauses a loaded file, `esc` mutes, `?` opens the Help
+panel (the detailed guide lives there), and the sliders set
 dry / harmony / spread / detune / reverb / master.
 
-The four level sliders (Dry, Harmony, Reverb, Master) are in decibels, as on a
-mixing desk: 0 dB leaves a signal unchanged, −6 dB is about half the amplitude,
-and the bottom of the travel is off. Dry, Harmony and Reverb go up to +6 dB of
-boost. Master stops at 0 dB, because it is what reaches your ears. Equal steps in
-dB sound like equal changes, which a plain gain multiplier did not: it squeezed
-most of the audible range into the bottom third of the slider. Spread is a
-percentage and Detune is in cents. Double-click any slider to reset it.
+The four level sliders (Dry, Harmony, Reverb, Master) are volume multipliers:
+1.00 leaves a signal unchanged, 0.50 halves it and 0 is off. Dry and Harmony go
+up to 1.50 of boost; Reverb and Master stop at 1.00. Spread runs from 0 to 1 and
+Detune is in cents. Double-click any slider to reset it.
 
-**Spread** pans the harmony voices apart, from centred (0%) to hard left and
-right (100%); the first two voices take the outside edges, so even a triad is wide.
+**Spread** pans the harmony voices apart, from centred (0) to hard left and
+right (1); the first two voices take the outside edges, so even a triad is wide.
 **Detune** nudges each voice sharp or flat by up to that many cents, left voices
 one way and right voices the other, as a doubler would, which thickens the
 stack. Together they give the wide, shimmering stack Prismizer is known for; both
 at zero is the old centred, dead-in-tune sound. The dry voice stays centred.
+
+## Visualizer
+
+The card at the top right has two views. **Pitch** scrolls through the last six
+seconds like a piano roll. Your sung pitch is a white line and each harmony voice
+is an amber bar at its note, so you can watch a chord land around the melody or
+see yourself drift. **Wave** is an oscilloscope of the output mix, triggered on a
+rising zero crossing so a steady note stands still, and auto-scaled so quiet
+singing still shows.
 
 ## Recording
 
@@ -136,7 +143,8 @@ shows it live. Three switches govern what it does with that:
 
 - **Follow my pitch** — on, a chord symbol means real notes: `Am` is A, C and E
   wherever your voice happens to be. Off, the keys and chart become fixed
-  intervals again and voice themselves against the fallback pitch dropdown.
+  intervals again and voice themselves against the **No pitch heard? Assume** note
+  in the chord chart panel.
 - **Preserve formants** — on is PSOLA; off is the old resampler. Flip it while
   holding a chord: off is the chipmunk sound, kept deliberately for comparison.
 - **Fold octaves** — on moves every harmony to the octave nearest your voice, so
@@ -144,7 +152,7 @@ shows it live. Three switches govern what it does with that:
   the written voicing (root nearest your voice, the rest stacked above, slash
   bass below), which is faithful to a transcription but rougher at the edges.
 
-**Range** trades pitch tracking against delay. The analysis has to hold about two
+**Lowest note** trades pitch tracking against delay. The analysis has to hold about two
 cycles of the lowest note you want found, and PSOLA needs a pitch period either
 side of each pulse, so the engine's delay follows directly from the lowest note:
 
@@ -172,6 +180,7 @@ mic or file ─► inputGain ─┬─► dryGain ──────────
 | `chords.js` | chord-symbol parsing and voicing |
 | `app.js` | audio graph, input sources, transport, recording, keyboard, chart control |
 | `recorder.js` | the capture worklet and the WAV encoder |
+| `visualizer.js` | the Pitch (piano-roll) and Wave (oscilloscope) views |
 | `index.html` | markup and styles |
 | `test-engine.js` | offline DSP checks |
 | `serve.py` | no-cache dev server |

@@ -172,6 +172,19 @@ the sound unchanged: dry 1.0 -> 0 dB, harmony 0.8 -> -1.9 dB (x0.8035, 0.03 dB o
 1 / 0.8035 / 0.2512 / 0.3508; esc mute -> 0 and unmute -> 0.3508; the bottom of travel reads "off" and
 is 0; +6 dB -> 1.9953; spread 100% -> engine 1.0; a real double-click resets Master to -9.1 dB.
 
+**Slider units reverted (user request).** Back to the original scales in the new UI: gain multipliers
+(Dry/Harmony 0-1.5, Reverb/Master 0-1), Spread 0-1, Detune in cents. Double-click reset, track fill and
+the "muted" readout kept. Verified startup gains 1 / 0.8 / 0.25 / 0.35, mute -> 0, unmute -> 0.35, and
+spread reset to 0.6, all reaching the engine.
+
+**Visualizer.** `visualizer.js`, a card above Mix with Pitch (piano roll: voice line plus harmony bars,
+auto-ranged with eased centre/span, C lines labelled) and Wave (a scope on a second analyser tapping
+the bus, zero-cross triggered, auto-gain). Fed once per animation frame from the existing meter loop.
+Harmony voices held as intervals (tracking off) are placed relative to the voice. Verified in Chrome
+with a generated A3-C4-E4-D4 melody played as a file: the trace stepped correctly with vibrato
+visible, Am then F showed as bars on the right notes, the scope held still, Stop reset to idle, and
+there were no console errors.
+
 **Stale module cache.** Chrome kept serving the old `app.js` after the rewrite, which presented as
 "the engine works standalone but the UI never updates". Replaced `http.server` with `serve.py`
 sending `no-store`.

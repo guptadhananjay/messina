@@ -1,5 +1,5 @@
 /**
- * Messina - phase 1.
+ * Messina - the page: audio graph, inputs, controllers and UI.
  *
  * source -+-> inputGain -+-> dryDelay -> dryGain ---------+-> mixBus -+-> bus -+-> masterGain -> out
  *         |              |                                |           |   ^    |
@@ -18,6 +18,7 @@
  */
 import { parseProgression, chordVoices, chordNotes, noteName, NOTE_NAMES } from './chords.js';
 import { encodeWav } from './recorder.js';
+import { createVisualizer } from './visualizer.js';
 
 const VOICE_COUNT = 8;
 const RAMP = 0.015;          // key attack/release, seconds
@@ -43,6 +44,13 @@ let running = false;
 let meterRaf = null;
 let octave = 0;
 let muted = false;
+
+// MIDI keyboard state; see the MIDI section below.
+const MIDI_UNISON = 60;
+let midiAccess = null;
+const midiDown = new Map();      // note number -> velocity, keys physically held
+const midiSustained = new Set(); // released while the pedal was down
+let midiPedal = false;
 
 let recorder = null;         // capture worklet node
 let takeChunks = null;       // [{ left, right }] while recording, else null
@@ -100,33 +108,28 @@ $('reference').addEventListener('change', () => {
   if (playingIndex !== null) soundChord(playingIndex);
 });
 
-/**
- * Level sliders are in decibels, as on a mixing desk: 0 dB leaves a signal
- * unchanged, and the bottom of the travel is off. Hearing works on ratios, so
- * equal steps in dB sound like equal steps, where a plain gain multiplier
- * crammed most of the audible range into the bottom third of the slider.
- */
-const LEVEL_OFF = -48;
-const dbToGain = (db) => (db <= LEVEL_OFF ? 0 : Math.pow(10, db / 20));
-const setLevel = (param, db) => param.setTargetAtTime(dbToGain(db), ctx.currentTime, 0.01);
+/** Level sliders are plain gain multipliers: 1.00 leaves a signal unchanged. */
+const setLevel = (param, gain) => param.setTargetAtTime(gain, ctx.currentTime, 0.01);
 
 const sliders = {
   dry: (v) => setLevel(nodes.dry.gain, v),
   harmony: (v) => setLevel(nodes.harmony.gain, v),
   reverb: (v) => setLevel(nodes.wet.gain, v),
-  master: (v) => setLevel(nodes.master.gain, muted ? LEVEL_OFF : v),
+  master: (v) => setLevel(nodes.master.gain, muted ? 0 : v),
   spread: () => sendConfig(),
   detune: () => sendConfig(),
 };
 
-const formatDb = (db) => (db <= LEVEL_OFF ? 'off'
-  : (db > 0 ? '+' : db < 0 ? '\u2212' : '') + Math.abs(db).toFixed(1) + ' dB');
-const sliderText = {
-  spread: (v) => v.toFixed(0) + '%',
-  detune: (v) => v.toFixed(0) + '\u00a2',
-};
+const formatGain = (v) => v.toFixed(2);
+const sliderText = { detune: (v) => v.toFixed(0) + '\u00a2' };
 const renderSlider = (name) => {
-  $(name + 'V').textContent = (sliderText[name] ?? formatDb)(Number($(name).value));
+  const input = $(name);
+  $(name + 'V').textContent = name === 'master' && muted
+    ? 'muted'
+    : (sliderText[name] ?? formatGain)(Number(input.value));
+  // Chrome can't colour the travelled part of a range track natively.
+  const fill = (input.value - input.min) / (input.max - input.min) * 100;
+  input.style.setProperty('--fill', fill.toFixed(1) + '%');
 };
 
 for (const name of Object.keys(sliders)) {
@@ -192,6 +195,10 @@ async function buildGraph() {
   recorder.port.onmessage = (e) => onRecorderMessage(e.data);
   bus.connect(recorder);
 
+  const scope = ctx.createAnalyser();            // the visualizer's wave view: the mix itself
+  scope.fftSize = 2048;
+  bus.connect(scope);
+
   engine = new AudioWorkletNode(ctx, 'messina-engine', {
     numberOfInputs: 1,
     numberOfOutputs: 1,
@@ -202,7 +209,7 @@ async function buildGraph() {
   engine.port.onmessage = (e) => onEngineStatus(e.data);
   input.connect(engine).connect(harmony);
 
-  nodes = { input, dryDelay, dry, harmony, mix, wet, bus, master, analyser };
+  nodes = { input, dryDelay, dry, harmony, mix, wet, bus, master, analyser, scope };
   sendConfig();
   for (const name of Object.keys(sliders)) sliders[name](Number($(name).value));
 
@@ -246,9 +253,7 @@ async function start() {
     $('record').disabled = false;
     $('start').textContent = 'Stop';
     $('start').classList.add('running');
-    $('status').textContent = sourceMode === 'mic'
-      ? 'Running - sing and hold keys'
-      : 'Running - press play';
+    $('status').textContent = runningStatus();
     updateTransport();
   } catch (err) {
     console.error(err);
@@ -256,6 +261,19 @@ async function start() {
     disconnectMic();
   }
   $('start').disabled = false;
+}
+
+function runningStatus() {
+  return sourceMode === 'mic' ? 'Running \u2014 sing, then hold keys or space' : 'Running \u2014 press play';
+}
+
+/** Mute is loud in the UI: a pill in the header, Master greyed and reading "muted". */
+function setMuted(on) {
+  muted = on;
+  document.body.classList.toggle('muted', on);
+  $('safetyAction').textContent = on ? 'unmutes' : 'mutes';
+  renderSlider('master');
+  if (ctx) sliders.master(Number($('master').value));
 }
 
 /** Tear the rig down: silence every voice, release the mic, close the context. */
@@ -268,6 +286,7 @@ async function stop() {
   stopFile();
   cancelAnimationFrame(meterRaf);
   meterRaf = null;
+  viz.reset();
 
   for (const id of [...held.keys()]) voiceOff(id);
   for (const el of keyEls.values()) el.classList.remove('on');
@@ -282,7 +301,7 @@ async function stop() {
   nodes = null;
   engine = null;
   held.clear();
-  muted = false;
+  setMuted(false);
   running = false;
 
   disconnectMic();
@@ -293,7 +312,7 @@ async function stop() {
   $('latency').textContent = '—';
   updateVoiceCount();
   updateTransport();
-  $('status').textContent = savedTake ? `Stopped - saved ${savedTake}` : 'Stopped';
+  $('status').textContent = savedTake ? `Stopped \u2014 saved ${savedTake}` : 'Stopped';
   $('start').textContent = 'Start';
   $('start').classList.remove('running');
   $('start').disabled = false;
@@ -301,16 +320,47 @@ async function stop() {
 
 function meterLoop(analyser) {
   const data = new Float32Array(analyser.fftSize);
+  const wave = new Float32Array(nodes.scope.fftSize);
   const tick = () => {
     analyser.getFloatTimeDomainData(data);
     let sum = 0;
     for (const s of data) sum += s * s;
     $('meter').style.width = Math.min(100, Math.sqrt(sum / data.length) * 320).toFixed(1) + '%';
+    vizFrame(wave);
     if (filePlaying) renderPlayhead();
     if (takeChunks) $('recTime').textContent = formatTime(ctx.currentTime - takeStartedAt);
     meterRaf = requestAnimationFrame(tick);
   };
   tick();
+}
+
+/* ---------- visualizer ---------- */
+
+const viz = createVisualizer($('viz'));
+
+/**
+ * What the visualizer draws this frame: your pitch, and every sounding voice as
+ * an absolute note. Voices are stored as notes while tracking and as intervals
+ * otherwise, so intervals are placed relative to your voice when there is one.
+ */
+function vizFrame(wave) {
+  const voice = detectedMidi();
+  const notes = [];
+  for (const n of held.values()) {
+    if (tracking) notes.push(n);
+    else if (voice !== null) notes.push(voice + n);
+  }
+  if (vizMode === 'wave') nodes.scope.getFloatTimeDomainData(wave);
+  viz.frame({ voice, notes, samples: vizMode === 'wave' ? wave : null });
+}
+
+let vizMode = 'pitch';
+for (const radio of document.querySelectorAll('input[name=vizMode]')) {
+  radio.addEventListener('change', () => {
+    vizMode = radio.value;
+    viz.setMode(vizMode);
+    $('vizLegend').hidden = vizMode !== 'pitch';
+  });
 }
 
 /* ---------- audio file source ---------- */
@@ -349,7 +399,7 @@ async function loadFile(file) {
   } catch (err) {
     console.error(err);
     fileBuffer = null;
-    $('fileName').textContent = `Could not decode ${file.name} - ${decodeHint(file.name)}`;
+    $('fileName').textContent = `Could not decode ${file.name} \u2014 ${decodeHint(file.name)}`;
   }
   updateTransport();
 }
@@ -438,6 +488,8 @@ function renderPlayhead() {
 }
 
 function updateTransport() {
+  $('fileTransport').hidden = !fileBuffer;
+  $('fileControls').classList.toggle('empty', !fileBuffer);
   $('playPause').disabled = !fileBuffer;
   $('rewind').disabled = !fileBuffer;
   $('playPause').textContent = filePlaying ? 'Pause' : 'Play';
@@ -447,6 +499,7 @@ function selectSource(mode) {
   sourceMode = mode;
   document.querySelector(`input[name=source][value=${mode}]`).checked = true;
   $('fileControls').hidden = mode !== 'file';
+  $('micNote').hidden = mode === 'file';
 
   if (mode === 'mic') {
     pauseFile();
@@ -598,7 +651,7 @@ function sendConfig() {
     absolute: tracking,
     window: r.window,
     fmin: r.fmin,
-    spread: Number($('spread').value) / 100,
+    spread: Number($('spread').value),
     detune: Number($('detune').value),
   });
 }
@@ -643,15 +696,18 @@ function renderReferenceState() {
 
 function renderPitch() {
   const live = detectedMidi();
+  $('tuner').classList.toggle('idle', live === null);
   if (live === null) {
-    $('pitch').textContent = '\u2014';
-    $('cents').textContent = tracking ? 'no pitch detected' : 'tracking off';
+    $('pitch').textContent = '\u2013';
+    $('cents').textContent = tracking ? 'Sing a note' : 'Tracking off';
   } else {
     const near = Math.round(live);
     const off = Math.round((live - near) * 100);
     $('pitch').textContent = noteName(near);
-    $('cents').textContent = (off >= 0 ? '+' : '') + off + ' cents \u00b7 '
+    $('cents').textContent = (off >= 0 ? '+' : '\u2212') + Math.abs(off) + ' cents \u00b7 '
       + detected.f0.toFixed(1) + ' Hz';
+    $('needle').style.left = (50 + off) + '%';      // -50..+50 cents across the scale
+    $('needle').classList.toggle('in-tune', Math.abs(off) <= 10);
   }
   $('confidence').style.width = Math.round(detected.confidence * 100) + '%';
   renderReferenceState();
@@ -670,7 +726,7 @@ function renderChart() {
   const strip = $('progression');
   strip.innerHTML = '';
   if (!chart.length) {
-    strip.innerHTML = '<span class="hint">Nothing loaded - type a chord chart above.</span>';
+    strip.innerHTML = '<span class="hint">Type or paste a chord chart above.</span>';
     return;
   }
   chart.forEach((entry, i) => {
@@ -690,10 +746,10 @@ function renderChart() {
 function describeChord(chord) {
   if (tracking) {
     return chordNotes(chord, referenceMidi(), { fold, maxVoices: VOICE_COUNT })
-      .map(noteName).join(' ');
+      .sort((a, b) => a - b).map(noteName).join(' ');
   }
   return chordVoices(chord, reference, VOICE_COUNT)
-    .map((s) => (s >= 0 ? '+' : '') + s).join(' ');
+    .sort((a, b) => a - b).map((s) => (s >= 0 ? '+' : '') + s).join(' ');
 }
 
 function queueChord(index) {
@@ -713,7 +769,7 @@ function soundChord(index = nextIndex) {
 
   if (!entry.chord) {
     releaseChordVoices();
-    $('status').textContent = `Can't read "${entry.token}" - skipped`;
+    $('status').textContent = `Can't read "${entry.token}" \u2014 skipped`;
     return;
   }
   // The octave is decided here, once, from the pitch at the moment you trigger
@@ -722,10 +778,27 @@ function soundChord(index = nextIndex) {
     ? chordNotes(entry.chord, referenceMidi(), { fold, maxVoices: VOICE_COUNT })
     : chordVoices(entry.chord, reference, VOICE_COUNT);
   notes.forEach((n, i) => voiceSet(`chord:${i}`, n));
+  chartNotes = notes;
+  renderPianoEcho();
   for (const id of [...held.keys()]) {          // drop voices this chord doesn't use
     if (id.startsWith('chord:') && Number(id.slice(6)) >= notes.length) voiceOff(id);
   }
   $('status').textContent = `${entry.token}  (${playingIndex + 1}/${chart.length})`;
+}
+
+/**
+ * Notes sounding from the chart or a MIDI keyboard are echoed on the on-screen
+ * piano in a softer tone than keys you press, so all three controllers show up
+ * in one place. Matched by pitch class, since the piano spans one octave.
+ */
+let chartNotes = [];
+function renderPianoEcho() {
+  const pcs = new Set();
+  for (const n of chartNotes) pcs.add(((n % 12) + 12) % 12);
+  for (const n of [...midiDown.keys(), ...midiSustained]) {
+    pcs.add((((tracking ? n : n - MIDI_UNISON) % 12) + 12) % 12);
+  }
+  for (const [key, semis] of KEY_MAP) keyEls.get(key).classList.toggle('echo', pcs.has(semis % 12));
 }
 
 /** Space released: drop the chord and cue up the next one. */
@@ -735,6 +808,8 @@ function releaseChord() {
     nextIndex = (playingIndex + 1) % chart.length;
   }
   playingIndex = null;
+  chartNotes = [];
+  renderPianoEcho();
   renderChart();
 }
 
@@ -756,11 +831,6 @@ renderPlayhead();
  * pianist wants. Fold on moves each to the octave nearest the voice. With
  * Follow my pitch off, middle C is your own pitch and the rest are intervals.
  */
-const MIDI_UNISON = 60;
-let midiAccess = null;
-const midiDown = new Map();      // note number -> velocity, keys physically held
-const midiSustained = new Set(); // released while the pedal was down
-let midiPedal = false;
 
 function midiTarget(note) {
   if (!tracking) return Math.max(SEMITONE_MIN, Math.min(SEMITONE_MAX, note - MIDI_UNISON));
@@ -813,10 +883,11 @@ function midiAllOff() {
 }
 
 function renderMidi() {
+  renderPianoEcho();
   if (!midiAccess) return;
   const names = [...midiAccess.inputs.values()].map((input) => input.name);
   if (!names.length) {
-    $('midiStatus').textContent = 'MIDI connected - plug in a keyboard';
+    $('midiStatus').textContent = 'MIDI on \u2014 plug in a keyboard';
     return;
   }
   const notes = [...new Set([...midiDown.keys(), ...midiSustained])].sort((x, y) => x - y);
@@ -832,7 +903,7 @@ function listenToInputs() {
 
 async function connectMidi() {
   if (!navigator.requestMIDIAccess) {
-    $('midiStatus').textContent = 'This browser has no Web MIDI - use Chrome';
+    $('midiStatus').textContent = 'This browser has no Web MIDI \u2014 use Chrome';
     return;
   }
   try {
@@ -886,20 +957,34 @@ const OWNED_KEYS = new Set([' ', 'p', 'r', 'arrowleft', 'arrowright', 'backspace
 /** Nothing sounds before Start - say so, rather than lighting a silent key. */
 function requireRunning() {
   if (running) return true;
-  $('status').textContent = 'Not running - press Start first';
+  $('status').textContent = 'Not running \u2014 press Start first';
   return false;
 }
 
+/* ---------- help ---------- */
+
+const help = $('help');
+const toggleHelp = () => (help.open ? help.close() : help.showModal());
+$('helpOpen').addEventListener('click', toggleHelp);
+$('helpClose').addEventListener('click', () => help.close());
+help.addEventListener('click', (e) => { if (e.target === help) help.close(); });   // backdrop
+
 window.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  // While help is open it owns the keyboard: esc closes it rather than muting,
+  // and nothing plays underneath.
+  if (help.open) {
+    if (e.key === '?') { e.preventDefault(); help.close(); }
+    return;
+  }
+  if (e.key === '?' && !typing(e.target)) { e.preventDefault(); help.showModal(); return; }
   const key = e.key.toLowerCase();
 
   if (key === 'escape') {
     if (typing(e.target)) { e.target.blur(); return; }
     if (!ctx) return;
-    muted = !muted;
-    sliders.master(Number($('master').value));
-    $('status').textContent = muted ? 'Muted' : 'Running - sing and hold keys';
+    setMuted(!muted);
+    $('status').textContent = muted ? 'Muted \u2014 esc to unmute' : runningStatus();
     return;
   }
   if (typing(e.target)) return;                  // let the chart box take its own keys
