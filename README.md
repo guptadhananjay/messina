@@ -30,6 +30,16 @@ release the mic and close the audio context.
 
 ## Input: mic or audio file
 
+In **Microphone** mode, **Device** picks the mic or audio interface, and
+**Channel** picks which input on it: Input 1, Input 2, or Both. Both are
+remembered between visits. An interface's sockets arrive as the channels of a
+single device; on a UMC202HD, input 1 is left and input 2 is right. The app used
+to ask Chrome for mono, which can hand over input 1 alone, so a mic in input 2
+was silent. It now takes every channel and routes the chosen one. *Both inputs*
+(the default) works whichever socket the mic is in, at half the level of picking
+the right one. If a connected mic stays silent for a few seconds, the card says
+what to check.
+
 Switch **Input** to **Audio file** to run a track through the harmonizer instead
 of your voice — pick a file or drop one onto the panel. `p` (or the Play button)
 starts it; there is a loop toggle and a clickable progress bar to scrub. File

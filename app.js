@@ -61,6 +61,14 @@ let takeSaving = false;      // stop requested, waiting on that last chunk
 let sourceMode = 'mic';
 let micStream = null;
 let micNode = null;
+let micSplit = null;         // picks one channel of a multi-input interface
+let quietSince = null;       // when the mic last went silent, for the "no sound" hint
+
+/** Per-browser conveniences; storage can be unavailable, so never rely on it. */
+const remember = (key, value) => { try { localStorage.setItem(key, value); } catch { /* ignore */ } };
+const recall = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+let micDeviceId = recall('messina.micDevice') ?? '';
+let micChannel = recall('messina.micChannel') ?? 'both';
 
 let fileBuffer = null;       // decoded PCM, survives a stop/start
 let fileNode = null;
@@ -219,23 +227,59 @@ async function buildGraph() {
   meterLoop(analyser);
 }
 
+/**
+ * An audio interface's inputs arrive as the channels of one device - on a
+ * two-input box like the UMC202HD, input 1 is left and input 2 is right. Asking
+ * for a mono stream let Chrome hand over input 1 alone, so a mic plugged into
+ * input 2 was pure silence. Take every channel and choose one here instead.
+ */
 async function connectMic() {
   if (micNode) return;
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 1,
-    },
-  });
+  const audio = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+  };
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: micDeviceId ? { ...audio, deviceId: { exact: micDeviceId } } : audio,
+    });
+  } catch (err) {
+    // The remembered device was unplugged: fall back to the default.
+    if (!micDeviceId || !['OverconstrainedError', 'NotFoundError'].includes(err.name)) throw err;
+    setMicDevice('');
+    micStream = await navigator.mediaDevices.getUserMedia({ audio });
+  }
   micNode = ctx.createMediaStreamSource(micStream);
-  micNode.connect(nodes.input);
+  routeMic();
+  quietSince = null;
+  refreshMicDevices();                           // labels only appear once permission is granted
+}
+
+/** Send the chosen input channel (or a mix of both) into the rig. */
+function routeMic() {
+  if (!micNode) return;
+  micNode.disconnect();
+  micSplit?.disconnect();
+  micSplit = null;
+  const channels = micStream.getAudioTracks()[0]?.getSettings().channelCount ?? 2;
+  $('micChannel').disabled = channels < 2;
+  if (micChannel === 'both' || channels < 2) {
+    micNode.connect(nodes.input);
+  } else {
+    micSplit = ctx.createChannelSplitter(2);
+    micNode.connect(micSplit);
+    micSplit.connect(nodes.input, micChannel === '2' ? 1 : 0);
+  }
 }
 
 function disconnectMic() {
   micNode?.disconnect();
+  micSplit?.disconnect();
+  micSplit = null;
   micNode = null;
+  $('micHint').hidden = true;
   micStream?.getTracks().forEach((track) => track.stop());
   micStream = null;
 }
@@ -325,7 +369,9 @@ function meterLoop(analyser) {
     analyser.getFloatTimeDomainData(data);
     let sum = 0;
     for (const s of data) sum += s * s;
-    $('meter').style.width = Math.min(100, Math.sqrt(sum / data.length) * 320).toFixed(1) + '%';
+    const rms = Math.sqrt(sum / data.length);
+    $('meter').style.width = Math.min(100, rms * 320).toFixed(1) + '%';
+    checkMicSilence(rms);
     vizFrame(wave);
     if (filePlaying) renderPlayhead();
     if (takeChunks) $('recTime').textContent = formatTime(ctx.currentTime - takeStartedAt);
@@ -495,11 +541,70 @@ function updateTransport() {
   $('playPause').textContent = filePlaying ? 'Pause' : 'Play';
 }
 
+/* ---------- mic device and channel ---------- */
+
+function setMicDevice(id) {
+  micDeviceId = id;
+  remember('messina.micDevice', id);
+}
+
+async function refreshMicDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const inputs = (await navigator.mediaDevices.enumerateDevices())
+    .filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications');
+  const select = $('micDevice');
+  const inUse = micStream?.getAudioTracks()[0]?.label;
+  select.innerHTML = '';
+  const fallback = document.createElement('option');
+  fallback.value = '';
+  fallback.textContent = !micDeviceId && inUse ? `System default (${inUse})` : 'System default';
+  select.appendChild(fallback);
+  inputs.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Microphone ${i + 1}`;
+    select.appendChild(opt);
+  });
+  select.value = inputs.some((d) => d.deviceId === micDeviceId) ? micDeviceId : '';
+}
+
+$('micDevice').addEventListener('change', async () => {
+  setMicDevice($('micDevice').value);
+  if (!running || sourceMode !== 'mic') return;
+  disconnectMic();
+  try {
+    await connectMic();
+  } catch (err) {
+    console.error(err);
+    $('status').textContent = 'Failed: ' + err.message;
+  }
+});
+$('micChannel').value = micChannel;
+$('micChannel').addEventListener('change', () => {
+  micChannel = $('micChannel').value;
+  remember('messina.micChannel', micChannel);
+  routeMic();
+});
+navigator.mediaDevices?.addEventListener('devicechange', refreshMicDevices);
+refreshMicDevices();
+
+/**
+ * A connected mic that stays silent is almost always the hardware side: gain
+ * at zero, the mic on the other input, no phantom power, or macOS not letting
+ * Chrome hear the mic. Say so after a few seconds instead of failing quietly.
+ */
+function checkMicSilence(rms) {
+  if (!micNode) return;
+  if (rms > 0.0005) { quietSince = null; $('micHint').hidden = true; return; }
+  quietSince ??= performance.now();
+  if (performance.now() - quietSince > 4000) $('micHint').hidden = false;
+}
+
 function selectSource(mode) {
   sourceMode = mode;
   document.querySelector(`input[name=source][value=${mode}]`).checked = true;
   $('fileControls').hidden = mode !== 'file';
-  $('micNote').hidden = mode === 'file';
+  $('micControls').hidden = mode === 'file';
 
   if (mode === 'mic') {
     pauseFile();

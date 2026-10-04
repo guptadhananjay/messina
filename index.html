@@ -173,7 +173,13 @@
     cursor: pointer; overflow: hidden;
   }
   .progress > i { display: block; height: 100%; width: 0; background: var(--accent); }
-  .mic-note { margin: 0; }
+  .mic-note { margin: 12px 0 0; }
+  .mic-field { border-top: 0; padding-top: 0; margin: 0 0 8px; }
+  .mic-field select { max-width: 70%; min-width: 0; text-overflow: ellipsis; }
+  .mic-hint {
+    margin: 4px 0 0; padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+    color: #f0c9a0; background: rgba(217, 100, 79, .12); border: 1px solid rgba(217, 100, 79, .35); border-radius: 8px;
+  }
 
   /* voice */
   .tuner { text-align: center; padding: 4px 0 2px; }
@@ -415,7 +421,26 @@
           <label><input type="radio" name="source" value="file">Audio file</label>
         </div>
       </div>
-      <p class="hint mic-note" id="micNote">Sing into your mic, then hold keys or <kbd>space</kbd> to add harmonies.</p>
+      <div id="micControls">
+        <div class="field mic-field">
+          <span>Device</span>
+          <select id="micDevice" aria-label="Microphone or audio interface"><option value="">System default</option></select>
+        </div>
+        <div class="field mic-field" title="On an audio interface, which input socket your mic is plugged into">
+          <span>Channel</span>
+          <select id="micChannel" aria-label="Input channel">
+            <option value="both">Both inputs</option>
+            <option value="1">Input 1</option>
+            <option value="2">Input 2</option>
+          </select>
+        </div>
+        <p class="mic-hint" id="micHint" role="status" hidden>
+          No sound from the mic. Turn up the input gain, set Channel to the socket your mic is in,
+          switch on +48V for a condenser mic, and check that Chrome is allowed under System Settings
+          &rsaquo; Privacy &amp; Security &rsaquo; Microphone.
+        </p>
+        <p class="hint mic-note" id="micNote">Sing into your mic, then hold keys or <kbd>space</kbd> to add harmonies.</p>
+      </div>
       <div id="fileControls" class="empty" hidden>
         <div class="file-row">
           <label class="filebtn">Choose file<input type="file" id="file" accept="audio/*" hidden></label>
@@ -591,6 +616,7 @@
     <h3>Troubleshooting</h3>
     <ul>
       <li><b>Harmonies lag behind.</b> Bluetooth headphones add well over 100 ms; wired headphones fix most of it. <i>Output</i> at the bottom of the Mix panel shows what your device adds.</li>
+      <li><b>No sound from a mic or audio interface.</b> Pick it under <b>Device</b> in the Input card. On a two-input interface (a UMC202HD, Scarlett 2i2 and so on), each socket is a separate channel: set <b>Channel</b> to the input your mic is in, or leave it on <i>Both inputs</i>. Then check the interface's gain knob, switch on <b>+48V</b> phantom power for a condenser mic, and make sure Chrome is allowed under System Settings &rsaquo; Privacy &amp; Security &rsaquo; Microphone. The level bar in the top bar moves whenever sound is getting in.</li>
       <li><b>Keys do nothing.</b> Press Start first, and click outside the chord box so it isn't catching your typing.</li>
       <li><b>Howling or squealing.</b> That's feedback &mdash; press <kbd>esc</kbd> and switch to headphones.</li>
       <li><b>MIDI keyboard not found.</b> Check it appears in macOS's Audio MIDI Setup, then reload.</li>
