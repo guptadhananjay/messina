@@ -308,7 +308,8 @@ async function start() {
 }
 
 function runningStatus() {
-  return sourceMode === 'mic' ? 'Running \u2014 sing, then hold keys or space' : 'Running \u2014 press play';
+  if (sourceMode === 'mic') return 'Running \u2014 sing, then hold keys or space';
+  return fileBuffer ? 'Running \u2014 press play' : 'Running \u2014 choose an audio file';
 }
 
 /** Mute is loud in the UI: a pill in the header, Master greyed and reading "muted". */
@@ -442,6 +443,7 @@ async function loadFile(file) {
     stopFile();
     $('fileName').textContent = `${file.name} · ${formatTime(fileBuffer.duration)}`;
     selectSource('file');
+    if (running) $('status').textContent = runningStatus();
   } catch (err) {
     console.error(err);
     fileBuffer = null;
@@ -881,7 +883,8 @@ function referenceMidi() {
 
 /** The fallback note only applies when nothing is being tracked. */
 function renderReferenceState() {
-  $('referenceLabel').style.opacity = tracking ? '0.45' : '1';
+  // Dimmed only while a pitch is being heard - that's when it isn't in use.
+  $('referenceLabel').style.opacity = tracking && detected.voiced ? '0.45' : '1';
   $('reference').disabled = tracking && detected.voiced;
 }
 
@@ -889,7 +892,7 @@ function renderPitch() {
   const live = detectedMidi();
   $('tuner').classList.toggle('idle', live === null);
   if (live === null) {
-    $('pitch').textContent = '\u2013';
+    $('pitch').textContent = '\u266A';
     $('cents').textContent = tracking ? 'Sing a note' : 'Tracking off';
   } else {
     const near = Math.round(live);
