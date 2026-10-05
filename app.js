@@ -758,8 +758,94 @@ function sendConfig() {
     fmin: r.fmin,
     spread: Number($('spread').value),
     detune: Number($('detune').value),
+    shape: currentShape(),
   });
 }
+
+/* ---------- voice shaping ---------- */
+
+/**
+ * LFO, envelope, glide, filter and formant controls for the harmony voices.
+ * Each slider runs 0..1000 internally and maps onto its real range - log for
+ * times and frequencies, so the useful end isn't crammed into a corner - and
+ * reads out in natural units. Defaults are neutral: the engine sounds exactly
+ * as it did before any of this existed.
+ */
+const logMap = (lo, hi) => ({
+  value: (p) => lo * Math.pow(hi / lo, p),
+  pos: (v) => Math.log(v / lo) / Math.log(hi / lo),
+});
+const linMap = (lo, hi, step = 0) => ({
+  value: (p) => { const v = lo + (hi - lo) * p; return step ? Math.round(v / step) * step : v; },
+  pos: (v) => (v - lo) / (hi - lo),
+});
+const offOrLog = (lo, hi) => ({                  // far left is off, then lo..hi
+  value: (p) => (p < 0.01 ? 0 : lo * Math.pow(hi / lo, (p - 0.01) / 0.99)),
+  pos: (v) => (v <= 0 ? 0 : 0.01 + 0.99 * Math.log(v / lo) / Math.log(hi / lo)),
+});
+const fmtTime = (s) => (s < 1 ? Math.round(s * 1000) + ' ms' : s.toFixed(2) + ' s');
+
+const SHAPE_CONTROLS = [
+  { key: 'lfoRate', group: 'lfo', label: 'Rate', map: logMap(0.1, 12), def: 5,
+    fmt: (v) => v.toFixed(v < 1 ? 2 : 1) + ' Hz', tip: 'How fast the LFO cycles' },
+  { key: 'lfoDepth', group: 'lfo', label: 'Depth', map: linMap(0, 1), def: 0,
+    fmt: (v) => v.toFixed(2),
+    tip: 'How much the LFO moves its target. At 1: pitch \u00b11 semitone, volume fully, pan side to side, filter \u00b13 octaves' },
+  { key: 'attack', group: 'env', label: 'Attack', map: logMap(0.005, 2), def: 0.036,
+    fmt: fmtTime, tip: 'How long a harmony takes to fade in' },
+  { key: 'release', group: 'env', label: 'Release', map: logMap(0.01, 4), def: 0.036,
+    fmt: fmtTime, tip: 'How long a harmony rings on after you let go' },
+  { key: 'glide', group: 'env', label: 'Glide', map: offOrLog(0.01, 1), def: 0,
+    fmt: (v) => (v === 0 ? 'off' : fmtTime(v)),
+    tip: 'How slowly voices slide to a new note when the chord changes. Never slows how they follow your own pitch' },
+  { key: 'cutoff', group: 'filter', label: 'Cutoff', map: logMap(200, 20000), def: 20000,
+    fmt: (v) => (v >= 19999 ? 'open' : v >= 1000 ? (v / 1000).toFixed(1) + ' kHz' : Math.round(v) + ' Hz'),
+    tip: 'Low-pass filter on the harmonies: lower is darker. Fully right is off' },
+  { key: 'resonance', group: 'filter', label: 'Resonance', map: linMap(0, 1), def: 0,
+    fmt: (v) => v.toFixed(2), tip: 'Emphasis at the cutoff - higher gives a vocal, wah-like peak' },
+  { key: 'formant', group: 'formant', label: 'Shift', map: linMap(-12, 12, 0.5), def: 0,
+    fmt: (v) => (v > 0 ? '+' : v < 0 ? '\u2212' : '') + Math.abs(v).toFixed(1) + ' st',
+    tip: 'Moves the vocal character up (smaller, brighter) or down (bigger, darker) without changing the notes. Needs Preserve formants on' },
+];
+
+function currentShape() {
+  const shape = { lfoShape: $('lfoShape').value, lfoTarget: $('lfoTarget').value };
+  for (const c of SHAPE_CONTROLS) {
+    const input = $(c.key);
+    // At its default position a slider sends the exact default, so neutral
+    // really is the old sound rather than a rounding error away from it.
+    shape[c.key] = input.value === input.defaultValue ? c.def : c.map.value(Number(input.value) / 1000);
+  }
+  return shape;
+}
+
+function sendShape() {
+  engine?.port.postMessage({ type: 'config', shape: currentShape() });
+}
+
+for (const c of SHAPE_CONTROLS) {
+  const row = document.createElement('label');
+  row.className = 'slider';
+  row.title = c.tip;
+  row.innerHTML = `<span>${c.label}</span><input type="range" id="${c.key}" min="0" max="1000" step="1"><span id="${c.key}V"></span>`;
+  $('shape-' + c.group).appendChild(row);
+  const input = $(c.key);
+  input.defaultValue = String(Math.round(c.map.pos(c.def) * 1000));
+  const render = () => {
+    $(c.key + 'V').textContent = c.fmt(c.map.value(Number(input.value) / 1000));
+    input.style.setProperty('--fill', (input.value / 10).toFixed(1) + '%');
+  };
+  render();
+  input.addEventListener('input', () => { render(); sendShape(); });
+  input.addEventListener('dblclick', () => { input.value = input.defaultValue; input.dispatchEvent(new Event('input')); });
+}
+for (const id of ['lfoShape', 'lfoTarget']) $(id).addEventListener('change', sendShape);
+$('shapeReset').addEventListener('click', () => {
+  for (const c of SHAPE_CONTROLS) { $(c.key).value = $(c.key).defaultValue; $(c.key).dispatchEvent(new Event('input')); }
+  $('lfoShape').value = 'sine';
+  $('lfoTarget').value = 'pitch';
+  sendShape();
+});
 
 let lastPreviewRef = null;
 

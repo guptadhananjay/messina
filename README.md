@@ -118,6 +118,32 @@ one way and right voices the other, as a doubler would, which thickens the
 stack. Together they give the wide, shimmering stack Prismizer is known for; both
 at zero is the old centred, dead-in-tune sound. The dry voice stays centred.
 
+## Voice shaping
+
+Synth-style controls for the harmony voices; the dry voice is never touched.
+Every default is neutral, so the sound is unchanged until you move something,
+and a test asserts it.
+
+- **LFO**: rate (0.1 to 12 Hz), depth, and a shape of sine, triangle, square or
+  random (sample-and-hold). The target is pitch (vibrato, ±1 semitone at
+  depth 1), volume (tremolo), pan, or filter cutoff (±3 octaves). Each voice
+  runs at its own phase offset, so a stack shimmers instead of moving in
+  lockstep.
+- **Envelope**: attack and release, from 5 ms to 4 s (to ~95% of the way).
+  Voice allocation now prefers silent voices, so long release tails aren't cut
+  short or bent toward the next note.
+- **Glide** slides each voice's *note* toward its new target, not its pitch
+  ratio. A slow glide therefore only slows chord changes, and tracked harmonies
+  still follow your own pitch instantly. A test checks this, and the naive
+  ratio-smoothing version fails it (harmony at 439 Hz instead of 392).
+- **Filter**: a resonant low-pass (a trapezoidal state-variable filter) on each
+  voice, so the LFO can sweep voices on their own phases. Fully open, it is
+  bypassed and the output is bit-identical.
+- **Formant shift**: PSOLA grains are read faster or slower than they are
+  written. Grain spacing still sets the pitch, but the waveform inside each
+  grain is scaled, which moves the spectral envelope (measured ×1.51 for +7
+  semitones, pitch unchanged). It applies only with *Preserve formants* on.
+
 ## Visualizer
 
 The card at the top right has two views. **Pitch** scrolls through the last six

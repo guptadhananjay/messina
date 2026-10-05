@@ -332,6 +332,15 @@
   .viz-legend i { display: inline-block; width: 16px; border-radius: 2px; }
   .lg-voice { height: 2px; background: var(--text); }
   .lg-harm { height: 5px; background: var(--accent); }
+  .small-btn { padding: 4px 10px; font-size: 12px; }
+  .shape-group + .shape-group { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .shape-group h3 {
+    margin: 4px 0 4px; font: 600 10.5px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--faint);
+  }
+  .shape-selects { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 4px; }
+  .shape-selects label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .shape-selects select { width: 100%; }
   dl.stats {
     display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px 12px; margin: 14px 0 0;
     padding-top: 14px; border-top: 1px solid var(--line); font-size: 12px;
@@ -557,6 +566,38 @@
         <dt>Rate</dt><dd id="sr">&mdash;</dd>
       </dl>
     </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Voice shaping</h2>
+        <button class="small-btn" id="shapeReset" title="Back to the neutral sound">Reset</button>
+      </div>
+      <div class="shape-group">
+        <h3>LFO</h3>
+        <div class="shape-selects">
+          <label title="The LFO's wave shape">Shape
+            <select id="lfoShape">
+              <option value="sine">Sine</option>
+              <option value="triangle">Triangle</option>
+              <option value="square">Square</option>
+              <option value="random">Random</option>
+            </select>
+          </label>
+          <label title="What the LFO moves">Target
+            <select id="lfoTarget">
+              <option value="pitch">Pitch (vibrato)</option>
+              <option value="volume">Volume (tremolo)</option>
+              <option value="pan">Pan</option>
+              <option value="filter">Filter</option>
+            </select>
+          </label>
+        </div>
+        <div id="shape-lfo"></div>
+      </div>
+      <div class="shape-group"><h3>Envelope</h3><div id="shape-env"></div></div>
+      <div class="shape-group"><h3>Filter</h3><div id="shape-filter"></div></div>
+      <div class="shape-group"><h3>Formant</h3><div id="shape-formant"></div></div>
+    </section>
   </div>
 </main>
 
@@ -590,6 +631,13 @@
 
     <h3>Visualizer</h3>
     <p><b>Pitch</b> scrolls through the last six seconds like a piano roll: the white line is the pitch you're singing, and each amber bar is a harmony voice at the note it's playing. The C lines are labelled so you can read octaves. It's the quickest way to see a chord land around your melody, or to spot yourself drifting off pitch. <b>Wave</b> is an oscilloscope of the output mix, held steady on each cycle and scaled up so quiet singing still shows.</p>
+
+    <h3>Voice shaping</h3>
+    <p>These shape the harmony voices only &mdash; your own voice is untouched. Everything starts neutral; <b>Reset</b> puts it back, and double-clicking a slider resets just that one.</p>
+    <p><b>LFO</b> is a slow, repeating wobble. <b>Target</b> picks what it moves: <i>Pitch</i> is vibrato, <i>Volume</i> is tremolo, <i>Pan</i> sweeps voices side to side, and <i>Filter</i> sweeps the filter's cutoff for a wah-like motion. <b>Rate</b> is how fast (cycles per second), <b>Depth</b> how far &mdash; at 1, pitch moves a full semitone either way. <b>Shape</b> is the wobble's curve; <i>Random</i> jumps to a new value each cycle. Every voice runs on its own phase, so a stack shimmers rather than wobbling in lockstep.</p>
+    <p><b>Envelope.</b> <b>Attack</b> is how long a harmony takes to swell in, <b>Release</b> how long it rings after you let go &mdash; long attacks and releases give slow, pad-like swells. <b>Glide</b> makes voices slide to their new notes when the chord changes; it never slows how they follow your own pitch.</p>
+    <p><b>Filter</b> is a low-pass on the harmonies: lower <b>Cutoff</b> is darker and softer, fully right is off. <b>Resonance</b> adds a peak at the cutoff, which sounds vocal and wah-like when swept by the LFO.</p>
+    <p><b>Formant shift</b> moves the character of the harmony voices up (smaller, brighter, younger) or down (bigger, darker) without changing the notes &mdash; a signature Prismizer sound. It works with <i>Preserve formants</i> on.</p>
 
     <h3>Mix</h3>
     <p>Levels are volume multipliers: <b>1.00</b> is unchanged, 0.50 is half the signal, 0 is off, and Dry and Harmony can boost up to 1.50. <b>Spread</b> pans the harmony voices apart, from 0 (centred) to 1 (hard left and right). <b>Detune</b> nudges each voice a few cents sharp or flat for a thicker, doubled sound &mdash; 6&ndash;10&cent; with a spread of 0.6&ndash;0.8 gives the wide Prismizer-style stack. <b>Master</b>, in the top bar, is only what you hear; recordings are taken before it. Double-click any slider to reset it.</p>

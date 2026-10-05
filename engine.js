@@ -40,6 +40,23 @@ const OCTAVE_RESCUE = 0.5;       // YIN dip at the old period that still counts 
 const VOICE_PAN = [-1, 1, -0.5, 0.5, -0.75, 0.75, -0.25, 0.25];
 const VOICE_DETUNE = [1, -1, 0.5, -0.5, 0.75, -0.75, 0.25, -0.25];
 
+// Voice shaping. Defaults are neutral: they reproduce the engine as it was.
+const SHAPE_DEFAULTS = {
+  attack: 0.036,                 // seconds to ~95%; 36 ms is the old fixed 12 ms time constant
+  release: 0.036,
+  glide: 0,                      // seconds for a voice to slide to a new note; 0 jumps
+  lfoRate: 5,                    // Hz
+  lfoDepth: 0,                   // 0..1, scaled per target below
+  lfoShape: 'sine',              // sine | triangle | square | random
+  lfoTarget: 'pitch',            // pitch | volume | pan | filter
+  cutoff: 20000,                 // Hz; at the top the filter is bypassed outright
+  resonance: 0,                  // 0..1
+  formant: 0,                    // semitones; PSOLA only
+};
+const LFO_PITCH_SEMIS = 1;       // depth 1 = +/- a semitone of vibrato
+const LFO_FILTER_OCTAVES = 3;    // depth 1 = +/- three octaves of sweep
+const FILTER_OPEN = 19999;
+
 /** Iterative radix-2 complex FFT with precomputed twiddles. */
 class FFT {
   constructor(n) {
@@ -132,11 +149,17 @@ class MessinaEngine extends AudioWorkletProcessor {
         gain: 0, gainTarget: 0, ratio: 1, ratioTarget: 1,
         nextOut: 0, delayPos: 0, blend: 1,
         pan: VOICE_PAN[i], detune: VOICE_DETUNE[i], gainL: 1, gainR: 1,
+        note: 0, ratioOut: 1,                      // glided note; ratio after the LFO
+        lfoOffset: i / MAX_VOICES, lfoVal: 0, lfoCycle: -1, lfoHeld: 0,
+        ic1: 0, ic2: 0,                            // filter state
         acc: new Float32Array(ACC), wsum: new Float32Array(ACC),
       });
     }
 
     this.blendCoef = 1 - Math.exp(-1 / (0.030 * sampleRate));
+    this.lfoSmoothCoef = 1 - Math.exp(-1 / (0.003 * sampleRate));   // de-clicks square and random
+    this.lfoPhase = 0;
+    this.setShape(SHAPE_DEFAULTS);
     this.duckBuf = new Float32Array(128);
     this.tmpA = new Float32Array(128);
     this.tmpB = new Float32Array(128);
@@ -173,8 +196,11 @@ class MessinaEngine extends AudioWorkletProcessor {
   onMessage(msg) {
     switch (msg.type) {
       case 'noteOn': {
+        // Prefer a silent voice, then the quietest released one, so long release
+        // tails aren't cut short or bent toward the next note.
         let voice = this.voices.find((v) => v.id === msg.id)
-          || this.voices.find((v) => !v.active)
+          || this.voices.find((v) => !v.active && v.gain < 1e-3)
+          || this.voices.filter((v) => !v.active).sort((a, b) => a.gain - b.gain)[0]
           || this.voices[0];
         if (voice.id !== null && voice.id !== msg.id) voice.gainTarget = 0;
         // Only rebuild the grain stream for a genuinely idle voice: doing it to
@@ -184,13 +210,16 @@ class MessinaEngine extends AudioWorkletProcessor {
         voice.active = true;
         voice.midi = msg.midi ?? null;
         voice.semis = msg.semis ?? 0;
+        if (fresh || this.glideCoef >= 1) voice.note = this.noteTarget(voice);
         voice.gainTarget = typeof msg.gain === 'number' ? Math.max(0, Math.min(1, msg.gain)) : 1;
         if (fresh) {
           voice.nextOut = this.write;
           voice.delayPos = 0;
           voice.acc.fill(0);
           voice.wsum.fill(0);
+          voice.ic1 = voice.ic2 = 0;
           voice.ratio = this.targetRatio(voice);
+          voice.ratioOut = voice.ratio;
           voice.blend = this.psolaTarget(voice);
         }
         break;
@@ -208,11 +237,46 @@ class MessinaEngine extends AudioWorkletProcessor {
         if (typeof msg.absolute === 'boolean') this.absolute = msg.absolute;
         if (typeof msg.spread === 'number') this.spread = Math.max(0, Math.min(1, msg.spread));
         if (typeof msg.detune === 'number') this.detune = Math.max(0, Math.min(50, msg.detune));
+        if (msg.shape) this.setShape(msg.shape);
         if (msg.window && msg.fmin && (msg.window !== this.W || msg.fmin !== this.fmin)) {
           this.configure(msg.window, msg.fmin);
         }
         this.postStatus();
         break;
+    }
+  }
+
+  /** Envelope, glide, LFO, filter and formant settings; unknown keys are ignored. */
+  setShape(shape) {
+    this.shape = { ...(this.shape || SHAPE_DEFAULTS), ...shape };
+    const sh = this.shape;
+    // Times are to ~95% of the way (three time constants), which is what an
+    // envelope's attack and release read as.
+    const coef = (seconds, step) => (seconds <= 0 ? 1 : 1 - Math.exp(-step / (seconds / 3 * sampleRate)));
+    this.attackCoef = coef(Math.max(0.001, sh.attack), 1);
+    this.releaseCoef = coef(Math.max(0.001, sh.release), 1);
+    this.glideCoef = coef(sh.glide, 128);
+    this.formantScale = Math.pow(2, Math.max(-12, Math.min(12, sh.formant)) / 12);
+  }
+
+  /** What a voice glides toward: an absolute note, or an interval. */
+  noteTarget(v) {
+    return v.midi !== null ? v.midi : v.semis;
+  }
+
+  /** -1..1 for this voice at LFO phase `p`; each voice runs at its own offset. */
+  lfoRaw(v, p) {
+    const ph = p + v.lfoOffset;
+    const frac = ph - Math.floor(ph);
+    switch (this.shape.lfoShape) {
+      case 'triangle': return 1 - 4 * Math.abs(frac - 0.5);
+      case 'square': return frac < 0.5 ? 1 : -1;
+      case 'random': {
+        const cycle = Math.floor(ph);
+        if (cycle !== v.lfoCycle) { v.lfoCycle = cycle; v.lfoHeld = Math.random() * 2 - 1; }
+        return v.lfoHeld;
+      }
+      default: return Math.sin(2 * Math.PI * frac);
     }
   }
 
@@ -393,14 +457,18 @@ class MessinaEngine extends AudioWorkletProcessor {
 
   /* ---------- synthesis ---------- */
 
+  /**
+   * Glide moves the voice's note, not its ratio, so a slow glide only slows
+   * chord changes - harmonies still follow your own pitch instantly.
+   */
   targetRatio(v) {
     const detune = Math.pow(2, v.detune * this.detune / 1200);
     if (this.absolute && v.midi !== null) {
-      const hz = 440 * Math.pow(2, (v.midi - 69) / 12);
+      const hz = 440 * Math.pow(2, (v.note - 69) / 12);
       if (this.f0 > 0) return Math.max(0.25, Math.min(4, detune * hz / this.f0));
       return v.ratio;                            // no pitch yet: hold
     }
-    return Math.max(0.25, Math.min(4, detune * Math.pow(2, v.semis / 12)));
+    return Math.max(0.25, Math.min(4, detune * Math.pow(2, (v.midi !== null ? 0 : v.note) / 12)));
   }
 
   readInterpolated(pos) {
@@ -430,10 +498,25 @@ class MessinaEngine extends AudioWorkletProcessor {
     if (mark === null) return;
     const half = Math.max(8, Math.round(Math.min(T0, T1)));
     const center = Math.round(centerOut);
+    const fs = this.formantScale;
+    if (fs === 1) {
+      for (let k = -half; k <= half; k++) {
+        const w = 0.5 + 0.5 * Math.cos(Math.PI * k / half);
+        const o = (center + k) & ACC_MASK;
+        v.acc[o] += w * this.buf[(mark + k) & BUF_MASK];
+        v.wsum[o] += w;
+      }
+      return;
+    }
+    // Formant shift: read the grain faster or slower than it is written. The
+    // spacing of grains still sets the pitch, but squeezing the waveform inside
+    // each one scales the spectral envelope by `fs` - the vocal character moves
+    // while the note stays put. Reads never pass the newest sample.
+    const newest = this.write - 2;
     for (let k = -half; k <= half; k++) {
       const w = 0.5 + 0.5 * Math.cos(Math.PI * k / half);
       const o = (center + k) & ACC_MASK;
-      v.acc[o] += w * this.buf[(mark + k) & BUF_MASK];
+      v.acc[o] += w * this.readInterpolated(Math.min(mark + k * fs, newest));
       v.wsum[o] += w;
     }
   }
@@ -451,7 +534,7 @@ class MessinaEngine extends AudioWorkletProcessor {
    */
   renderPsolaInto(v, buf, frameStart, n) {
     const T0 = this.T0;
-    const T1 = Math.max(4, T0 / v.ratio);
+    const T1 = Math.max(4, T0 / v.ratioOut);
     const horizon = frameStart + n + T0;
     if (v.nextOut < frameStart) v.nextOut = frameStart;
     let guard = 0;
@@ -471,7 +554,7 @@ class MessinaEngine extends AudioWorkletProcessor {
   /** Phase 1's splice-crossfade resampler: A/B control, and the deep-shift path. */
   renderResampleInto(v, buf, frameStart, n) {
     const G = this.grain;
-    const step = 1 - v.ratio;
+    const step = 1 - v.ratioOut;
     const thr = Math.abs(step) * this.xfade;
     for (let i = 0; i < n; i++) {
       const base = frameStart + i - this.delay;
@@ -534,10 +617,26 @@ class MessinaEngine extends AudioWorkletProcessor {
     if (this.tmpA.length !== n) { this.tmpA = new Float32Array(n); this.tmpB = new Float32Array(n); }
     out.fill(0);
     if (outR) outR.fill(0);
+    const sh = this.shape;
+    const lfoOn = sh.lfoDepth > 0;
+    const lfoStep = sh.lfoRate / sampleRate;
+    const lfoStart = this.lfoPhase;
+    this.lfoPhase = (this.lfoPhase + lfoStep * n) % 1;
+    const perSample = lfoOn && (sh.lfoTarget === 'volume' || sh.lfoTarget === 'pan');
+    const filterOn = sh.cutoff < FILTER_OPEN || (lfoOn && sh.lfoTarget === 'filter');
+
     for (const v of this.voices) {
       if (!v.active && v.gain < 1e-4) continue;
+      v.note += (this.noteTarget(v) - v.note) * this.glideCoef;
       v.ratioTarget = this.targetRatio(v);
       v.ratio += (v.ratioTarget - v.ratio) * this.ratioCoef;
+
+      // Pitch and filter move once per quantum (2.7 ms), which is smooth at LFO
+      // rates; volume and pan move per sample below.
+      if (lfoOn && !perSample) v.lfoVal += (this.lfoRaw(v, lfoStart) - v.lfoVal) * Math.min(1, this.lfoSmoothCoef * n);
+      v.ratioOut = lfoOn && sh.lfoTarget === 'pitch'
+        ? v.ratio * Math.pow(2, sh.lfoDepth * LFO_PITCH_SEMIS * v.lfoVal / 12)
+        : v.ratio;
 
       const target = this.psolaTarget(v);
       this.renderPsolaInto(v, this.tmpA, frameStart, n);
@@ -545,21 +644,58 @@ class MessinaEngine extends AudioWorkletProcessor {
         // Fully on PSOLA: skip the resampler but keep its delay line advancing,
         // so a later crossfade into it starts from the right phase rather than
         // jumping. Its only state is that phase, so this is exact.
-        v.delayPos = this.advanceDelayPos(v.delayPos, 1 - v.ratio, n);
+        v.delayPos = this.advanceDelayPos(v.delayPos, 1 - v.ratioOut, n);
       } else {
         this.renderResampleInto(v, this.tmpB, frameStart, n);
       }
       // Equal-power pan, scaled by sqrt(2) so the centre is unity in each ear:
       // spread 0 is exactly the old mono, and panning never changes the power.
-      const theta = (v.pan * this.spread + 1) * Math.PI / 4;
-      const panL = Math.SQRT2 * Math.cos(theta), panR = Math.SQRT2 * Math.sin(theta);
+      let panL, panR;
+      const setPan = (pos) => {
+        const theta = (Math.max(-1, Math.min(1, pos)) + 1) * Math.PI / 4;
+        panL = Math.SQRT2 * Math.cos(theta);
+        panR = Math.SQRT2 * Math.sin(theta);
+      };
+      setPan(v.pan * this.spread);
+
+      // Resonant low-pass (Cytomic's trapezoidal SVF), one per voice so each
+      // can be swept on its own LFO phase. Skipped outright when fully open.
+      let a1 = 0, a2 = 0, a3 = 0;
+      if (filterOn) {
+        let fc = sh.cutoff;
+        if (lfoOn && sh.lfoTarget === 'filter') fc *= Math.pow(2, sh.lfoDepth * LFO_FILTER_OCTAVES * v.lfoVal);
+        fc = Math.max(30, Math.min(0.45 * sampleRate, fc));
+        const g = Math.tan(Math.PI * fc / sampleRate);
+        const k = 1 / (0.5 * Math.pow(24, sh.resonance));        // Q from 0.5 to 12
+        a1 = 1 / (1 + g * (g + k));
+        a2 = g * a1;
+        a3 = g * a2;
+      }
+
+      const up = v.gainTarget > v.gain;
+      const envCoef = up ? this.attackCoef : this.releaseCoef;
+      let p = lfoStart;
       for (let i = 0; i < n; i++) {
         v.blend += (target - v.blend) * this.blendCoef;
-        const s = v.blend > 0.999
+        let s = v.blend > 0.999
           ? this.tmpA[i]
           : v.blend * this.tmpA[i] + (1 - v.blend) * this.tmpB[i];
-        v.gain += (v.gainTarget - v.gain) * this.gainCoef;
-        const y = s * v.gain * this.duckBuf[i];
+        if (filterOn) {
+          const v3 = s - v.ic2;
+          const v1 = a1 * v.ic1 + a2 * v3;
+          const v2 = v.ic2 + a2 * v.ic1 + a3 * v3;
+          v.ic1 = 2 * v1 - v.ic1;
+          v.ic2 = 2 * v2 - v.ic2;
+          s = v2;
+        }
+        v.gain += (v.gainTarget - v.gain) * envCoef;
+        let y = s * v.gain * this.duckBuf[i];
+        if (perSample) {
+          v.lfoVal += (this.lfoRaw(v, p) - v.lfoVal) * this.lfoSmoothCoef;
+          p += lfoStep;
+          if (sh.lfoTarget === 'volume') y *= 1 - sh.lfoDepth * (0.5 - 0.5 * v.lfoVal);
+          else setPan(v.pan * this.spread + sh.lfoDepth * v.lfoVal);
+        }
         if (outR) {
           v.gainL += (panL - v.gainL) * this.gainCoef;     // glide, so moving spread doesn't zipper
           v.gainR += (panR - v.gainR) * this.gainCoef;

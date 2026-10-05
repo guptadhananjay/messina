@@ -529,6 +529,136 @@ print('-- per-note gain --');
         'gain 3 gives x' + (over / full).toFixed(3));
 })();
 
+/* ---------- 4f. voice shaping: envelope, glide, LFO, filter, formant ---------- */
+
+print('-- voice shaping --');
+(function () {
+  /** Run the engine with timed messages: events = [[seconds, msg], ...]. */
+  function script(sig, events, stereo) {
+    var p = new Processor();
+    p.onMessage({ type: 'config', mode: 'psola', absolute: false, window: 2048, fmin: 82 });
+    var out = new Float32Array(sig.length), right = new Float32Array(sig.length), block = 128, e = 0;
+    events = events.slice().sort(function (a, b) { return a[0] - b[0]; });
+    for (var i = 0; i + block <= sig.length; i += block) {
+      while (e < events.length && events[e][0] * SR <= i) p.onMessage(events[e++][1]);
+      var a = new Float32Array(block), o = new Float32Array(block), r = new Float32Array(block);
+      a.set(sig.subarray(i, i + block));
+      p.process([[a]], [stereo ? [o, r] : [o]], {});
+      out.set(o, i); right.set(r, i);
+    }
+    return { out: out, right: right };
+  }
+  function rms(x, at, len) {
+    var a = Math.floor(at * SR), n = Math.floor(len * SR), s = 0;
+    for (var i = a; i < a + n; i++) s += x[i] * x[i];
+    return Math.sqrt(s / n);
+  }
+  function f0At(x, at, len) {
+    var a = Math.floor(at * SR);
+    return estimateF0(x.subarray(0, a + Math.floor((len || 0.06) * SR)), a);
+  }
+  var shape = function (o) { return { type: 'config', shape: o }; };
+  var on = function (semis) { return { type: 'noteOn', id: 'v', semis: semis }; };
+  var sig = syntheticVoice(150, 2.0);
+
+  // Envelope: a slow attack swells in, a long release rings on.
+  var slow = script(sig, [[0, shape({ attack: 0.3 })], [0.5, on(7)]]);
+  var fast = script(sig, [[0.5, on(7)]]);
+  var swell = rms(slow.out, 0.53, 0.02) / rms(slow.out, 1.2, 0.05);
+  var snap = rms(fast.out, 0.53, 0.02) / rms(fast.out, 1.2, 0.05);
+  check(swell < 0.45 && snap > 0.8, 'attack swells the voice in',
+        '30 ms after note-on: ' + (swell * 100).toFixed(0) + '% with 300 ms attack, '
+        + (snap * 100).toFixed(0) + '% with the default');
+
+  var off = { type: 'noteOff', id: 'v' };
+  var tail = script(sig, [[0, shape({ release: 1.0 })], [0.4, on(7)], [1.0, off]]);
+  var cut = script(sig, [[0.4, on(7)], [1.0, off]]);
+  var ring = rms(tail.out, 1.25, 0.03) / rms(tail.out, 0.9, 0.05);
+  var gone = rms(cut.out, 1.25, 0.03) / rms(cut.out, 0.9, 0.05);
+  check(ring > 0.3 && gone < 0.01, 'release lets the voice ring on',
+        '250 ms after note-off: ' + (ring * 100).toFixed(0) + '% with 1 s release, '
+        + (gone * 100).toFixed(1) + '% with the default');
+
+  // Glide: a retarget slides instead of jumping.
+  var glide = script(sig, [[0, shape({ glide: 0.4 })], [0.3, on(0)], [0.8, on(12)]]);
+  var mid = f0At(glide.out, 0.9), end = f0At(glide.out, 1.6);
+  check(mid > 170 && mid < 280 && Math.abs(cents(end, 300)) < 25, 'glide slides between notes',
+        '100 ms in: ' + mid.toFixed(0) + ' Hz (from 150 to 300), settled at ' + end.toFixed(1) + ' Hz');
+
+  // Glide must not make a tracked harmony lag the singer: it slows note
+  // changes, not the ratio that follows your pitch.
+  var n1 = syntheticVoice(150, 0.7), n2 = syntheticVoice(200, 0.9), sung = new Float32Array(n1.length + n2.length);
+  sung.set(n1); sung.set(n2, n1.length);
+  var pAbs = new Processor();
+  pAbs.onMessage({ type: 'config', mode: 'psola', absolute: true, window: 2048, fmin: 82, shape: { glide: 0.5 } });
+  var absOut = new Float32Array(sung.length);
+  for (var i = 0; i + 128 <= sung.length; i += 128) {
+    if (i === 128 * 1000) pAbs.onMessage({ type: 'noteOn', id: 'h', midi: 67 });
+    if (i === 0) pAbs.onMessage({ type: 'noteOn', id: 'h', midi: 67 });
+    var ai = new Float32Array(128), ao = new Float32Array(128);
+    ai.set(sung.subarray(i, i + 128));
+    pAbs.process([[ai]], [[ao]], {});
+    absOut.set(ao, i);
+  }
+  var after = f0At(absOut, 0.7 + 0.15, 0.08);
+  check(Math.abs(cents(after, 392)) < 30, 'glide does not lag the singer',
+        'singer jumps 150 -> 200 Hz; harmony on G4 reads ' + after.toFixed(1) + ' Hz 150 ms later (want 392)');
+
+  // LFO on pitch: vibrato of the requested depth; depth 0 does nothing.
+  function swing(res) {
+    var lo = Infinity, hi = -Infinity;
+    for (var t = 0.6; t < 1.8; t += 0.025) {
+      var c = cents(f0At(res.out, t, 0.03), 150 * Math.pow(2, 7 / 12));
+      lo = Math.min(lo, c); hi = Math.max(hi, c);
+    }
+    return hi - lo;
+  }
+  var vib = swing(script(sig, [[0, shape({ lfoDepth: 0.5, lfoRate: 4, lfoTarget: 'pitch' })], [0.3, on(7)]]));
+  var flat = swing(script(sig, [[0.3, on(7)]]));
+  check(vib > 70 && vib < 130 && flat < 15, 'LFO vibrato swings the pitch',
+        'peak-to-peak ' + vib.toFixed(0) + ' cents at depth 0.5 (want ~100), ' + flat.toFixed(0) + ' with LFO off');
+
+  // LFO on volume: tremolo.
+  var trem = script(sig, [[0, shape({ lfoDepth: 1, lfoRate: 5, lfoTarget: 'volume' })], [0.3, on(7)]]);
+  var lo = Infinity, hi = 0;
+  for (var t = 0.7; t < 1.5; t += 0.01) { var r = rms(trem.out, t, 0.01); lo = Math.min(lo, r); hi = Math.max(hi, r); }
+  check(lo / hi < 0.15, 'LFO tremolo swings the level', 'quietest/loudest 10 ms window ' + (lo / hi * 100).toFixed(0) + '%');
+
+  // LFO on pan: the voice moves from one side to the other.
+  var pan = script(sig, [[0, shape({ lfoDepth: 1, lfoRate: 3, lfoTarget: 'pan' })], [0.3, on(7)]], true);
+  var mostL = -Infinity, mostR = -Infinity;
+  for (var t2 = 0.7; t2 < 1.6; t2 += 0.02) {
+    var l = rms(pan.out, t2, 0.02), rr = rms(pan.right, t2, 0.02);
+    var db = 20 * Math.log((l + 1e-9) / (rr + 1e-9)) / Math.LN10;
+    mostL = Math.max(mostL, db); mostR = Math.max(mostR, -db);
+  }
+  check(mostL > 15 && mostR > 15, 'LFO auto-pan sweeps side to side',
+        'up to ' + mostL.toFixed(0) + ' dB left and ' + mostR.toFixed(0) + ' dB right');
+
+  // Filter: a low cutoff darkens; fully open is exactly the unfiltered sound.
+  function highBand(x) {
+    var sp = spectrum(x, Math.floor(SR * 0.8), 4096, 6000, 50), e = 0;
+    for (var k = 0; k < sp.freqs.length; k++) if (sp.freqs[k] > 2500) e += sp.mags[k] * sp.mags[k];
+    return e;
+  }
+  var dark = script(sig, [[0, shape({ cutoff: 600 })], [0.3, on(7)]]);
+  var plain = script(sig, [[0.3, on(7)]]);
+  var open = script(sig, [[0, shape({ cutoff: 20000, resonance: 0.7 })], [0.3, on(7)]]);
+  var drop = 10 * Math.log(highBand(dark.out) / highBand(plain.out)) / Math.LN10;
+  var same = 0;
+  for (var j = 0; j < plain.out.length; j++) same = Math.max(same, Math.abs(plain.out[j] - open.out[j]));
+  check(drop < -20, 'filter cutoff darkens the voice', 'energy above 2.5 kHz ' + drop.toFixed(0) + ' dB at 600 Hz cutoff');
+  check(same === 0, 'an open filter is bypassed exactly', 'largest difference ' + same);
+
+  // Formant shift: the envelope moves by the requested amount, the note doesn't.
+  var srcEnv2 = spectralEnvelope(sig, Math.floor(SR * 0.8), 150);
+  var fUp = script(sig, [[0, shape({ formant: 7 })], [0.3, on(0)]]);
+  var fScale = bestScale(srcEnv2, spectralEnvelope(fUp.out, Math.floor(SR * 0.8), 150));
+  var fPitch = f0At(fUp.out, 1.0, 0.2);
+  check(Math.abs(fScale.scale - 1.5) < 0.15 && Math.abs(cents(fPitch, 150)) < 15, 'formant shift moves the character, not the note',
+        '+7 st: envelope x' + fScale.scale.toFixed(2) + ' (want x1.50), pitch ' + fPitch.toFixed(1) + ' Hz (want 150)');
+})();
+
 /* ---------- 5. continuity ---------- */
 
 print('-- continuity --');
